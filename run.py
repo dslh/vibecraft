@@ -89,7 +89,7 @@ class HarnessBot(BotAI):
 
 def main():
     parser = argparse.ArgumentParser(description="SC2 Bot Harness with hot-reload")
-    parser.add_argument("--map", default="AcropolisLE", help="Map name (default: AcropolisLE)")
+    parser.add_argument("--map", default="Simple64", help="Map name (default: Simple64)")
     parser.add_argument("--race", default="terran", choices=list(RACE_MAP.keys()), help="Bot race")
     parser.add_argument(
         "--difficulty",
