@@ -11,6 +11,7 @@ logs the error and skips that tick — the game keeps running.
 """
 
 import argparse
+import asyncio
 import importlib
 import inspect
 import os
@@ -21,9 +22,13 @@ from loguru import logger
 
 from sc2 import maps
 from sc2.bot_ai import BotAI
+from sc2.client import Client
 from sc2.data import Difficulty, Race, Result
-from sc2.main import run_game
+from sc2.main import _play_game_ai, run_game
 from sc2.player import Bot, Computer, Human
+from sc2.sc2process import SC2Process
+
+from ports import DEFAULT_BASE_PORT, make_portconfig
 
 # The bot module to hot-reload. Lives next to this file.
 BOT_MODULE_NAME = "bot"
@@ -90,6 +95,36 @@ class HarnessBot(BotAI):
         print(f"[harness] Game ended: {game_result}")
 
 
+async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: int):
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
+    portconfig = make_portconfig(base_port, num_players)
+    harness_bot = HarnessBot()
+
+    print(f"[harness] Joining LAN game at {host_ip}...")
+
+    async with SC2Process() as controller:
+        client = Client(controller._ws)
+        player_id = await client.join_game(
+            race=race,
+            portconfig=portconfig,
+            host_ip=host_ip,
+        )
+
+        print(f"[harness] Joined as player {player_id}. Game starting!")
+        print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+        print()
+
+        result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
+
+        print(f"[harness] Game ended: {result}")
+
+        try:
+            await client.leave()
+        except Exception:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="SC2 Bot Harness with hot-reload")
     parser.add_argument("--map", default="Simple64", help="Map name (default: Simple64)")
@@ -112,6 +147,20 @@ def main():
         default="random",
         choices=list(RACE_MAP.keys()),
         help="Enemy race (ignored in --human mode)",
+    )
+    parser.add_argument(
+        "--join",
+        default=None,
+        metavar="HOST_IP",
+        help="Join a LAN game at the given server IP",
+    )
+    parser.add_argument(
+        "--base-port", type=int, default=DEFAULT_BASE_PORT,
+        help=f"Base port for LAN games (default: {DEFAULT_BASE_PORT})",
+    )
+    parser.add_argument(
+        "--players", type=int, default=2,
+        help="Number of players in the LAN game (default: 2)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -138,6 +187,10 @@ def main():
         _sc2proc.subprocess.Popen = _popen_no_suppress
 
     bot_race = RACE_MAP[args.race]
+
+    if args.join:
+        asyncio.run(join_lan_game(args.join, bot_race, args.base_port, args.players))
+        return
 
     if args.human:
         human_race = RACE_MAP[args.human]
