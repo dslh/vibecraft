@@ -30,7 +30,7 @@ Sending commands:
 from sc2.ids.unit_typeid import UnitTypeId
 
 
-def play(bot, memory):
+async def play(bot, memory):
     # Gather idle workers
     for worker in bot.workers.idle:
         patch = bot.mineral_field.closest_to(worker)
