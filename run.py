@@ -4,6 +4,8 @@ SC2 Bot Harness — hot-reloads bot.py on every game tick.
 Usage:
     python run.py [--map MAP_NAME] [--race RACE] [--difficulty DIFFICULTY]
     python run.py --human protoss --race zerg     # play against your own bot
+    python run.py --host --race terran            # host a LAN game
+    python run.py --join 192.168.1.100 --race zerg  # join a LAN game
 
 While the game is running, edit bot.py and save. Your changes take effect
 on the next tick. If bot.py has a syntax error or crashes, the harness
@@ -15,6 +17,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import socket
 import sys
 import traceback
 
@@ -95,11 +98,74 @@ class HarnessBot(BotAI):
         print(f"[harness] Game ended: {game_result}")
 
 
+def get_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+async def _run_lan_game(client, player_id):
+    """Shared game loop for both host and join LAN paths."""
+    harness_bot = HarnessBot()
+
+    print(f"[harness] Joined as player {player_id}. Game starting!")
+    print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    print()
+
+    result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
+
+    print(f"[harness] Game ended: {result}")
+
+    try:
+        await client.leave()
+    except Exception:
+        pass
+
+
+async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int):
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
+    portconfig = make_portconfig(base_port, num_players)
+    lan_ip = get_lan_ip()
+
+    print(f"[harness] Hosting LAN game on {map_name}...")
+
+    async with SC2Process() as controller:
+        players = [Human(Race.Random) for _ in range(num_players)]
+        result = await controller.create_game(maps.get(map_name), players, realtime=True)
+
+        if result.create_game.HasField("error"):
+            err = result.create_game.error
+            details = result.create_game.error_details if result.create_game.HasField("error_details") else ""
+            print(f"[harness] Failed to create game: {err} {details}")
+            return
+
+        print(f"[harness] Game created ({num_players} player slots)")
+        print(f"[harness] Other player should run:")
+        print(f"[harness]   python run.py --join {lan_ip} --race <race>")
+        if base_port != DEFAULT_BASE_PORT:
+            print(f"[harness]   (add --base-port {base_port})")
+        print(f"[harness] Waiting for opponent to join...")
+
+        client = Client(controller._ws)
+        player_id = await client.join_game(
+            race=race,
+            portconfig=portconfig,
+            host_ip=lan_ip,
+        )
+
+        await _run_lan_game(client, player_id)
+
+
 async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: int):
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
 
     portconfig = make_portconfig(base_port, num_players)
-    harness_bot = HarnessBot()
 
     print(f"[harness] Joining LAN game at {host_ip}...")
 
@@ -111,18 +177,7 @@ async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: i
             host_ip=host_ip,
         )
 
-        print(f"[harness] Joined as player {player_id}. Game starting!")
-        print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
-        print()
-
-        result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
-
-        print(f"[harness] Game ended: {result}")
-
-        try:
-            await client.leave()
-        except Exception:
-            pass
+        await _run_lan_game(client, player_id)
 
 
 def main():
@@ -147,6 +202,11 @@ def main():
         default="random",
         choices=list(RACE_MAP.keys()),
         help="Enemy race (ignored in --human mode)",
+    )
+    parser.add_argument(
+        "--host",
+        action="store_true",
+        help="Host a LAN game (other player joins with --join)",
     )
     parser.add_argument(
         "--join",
@@ -187,6 +247,10 @@ def main():
         _sc2proc.subprocess.Popen = _popen_no_suppress
 
     bot_race = RACE_MAP[args.race]
+
+    if args.host:
+        asyncio.run(host_lan_game(args.map, bot_race, args.base_port, args.players))
+        return
 
     if args.join:
         asyncio.run(join_lan_game(args.join, bot_race, args.base_port, args.players))
