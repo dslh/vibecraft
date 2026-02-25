@@ -127,11 +127,12 @@ async def _run_lan_game(client, player_id):
         pass
 
 
-async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int):
+async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int, lan_ip: str | None = None):
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
 
     portconfig = make_portconfig(base_port, num_players)
-    lan_ip = get_lan_ip()
+    if lan_ip is None:
+        lan_ip = get_lan_ip()
 
     print(f"[harness] Hosting LAN game on {map_name}...")
 
@@ -223,6 +224,10 @@ def main():
         help="Number of players in the LAN game (default: 2)",
     )
     parser.add_argument(
+        "--lan-ip", default=None,
+        help="Override auto-detected LAN IP (use 127.0.0.1 for local testing)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging from python-sc2 and SC2 process",
@@ -249,7 +254,7 @@ def main():
     bot_race = RACE_MAP[args.race]
 
     if args.host:
-        asyncio.run(host_lan_game(args.map, bot_race, args.base_port, args.players))
+        asyncio.run(host_lan_game(args.map, bot_race, args.base_port, args.players, lan_ip=args.lan_ip))
         return
 
     if args.join:
