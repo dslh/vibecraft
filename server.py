@@ -13,6 +13,7 @@ URLs, then waits. Remote bots connect via:
 import argparse
 import asyncio
 import os
+import signal
 import socket
 import sys
 
@@ -60,8 +61,18 @@ async def run_server(num_instances: int):
         print()
         print(f"[server] Press Ctrl+C to shut down.")
 
-        # Wait until interrupted
-        await asyncio.Event().wait()
+        # SC2Process.__aenter__ installs a SIGINT handler that kills SC2 but
+        # swallows the interrupt. Install our own on top so Ctrl+C also wakes
+        # the event loop.
+        shutdown = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def _shutdown_handler(*_args):
+            loop.call_soon_threadsafe(shutdown.set)
+
+        signal.signal(signal.SIGINT, _shutdown_handler)
+
+        await shutdown.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
