@@ -85,3 +85,50 @@ def play(bot, memory):
 ```
 
 `play()` can also be `async` if you need python-sc2's async methods (e.g. `find_placement`).
+
+## Multiplayer
+
+### LAN mode
+
+Two players on the same network, each running SC2 locally:
+
+```bash
+# Player 1 (host):
+.venv/bin/python3 run.py --host --race terran
+
+# Player 2 (join — use the IP printed by the host):
+.venv/bin/python3 run.py --join 192.168.1.100 --race zerg
+```
+
+### Remote mode
+
+Bot code runs on each player's machine; SC2 instances run on a shared server (or any machine). This decouples bot development from SC2 hosting — useful for live coding competitions.
+
+**On the server machine**, launch SC2 instances:
+
+```bash
+.venv/bin/python3 server.py
+```
+
+This starts two SC2 instances and prints their WebSocket URLs and the commands each player should run.
+
+**On each player's machine**, connect to a remote SC2 instance:
+
+```bash
+# Player 1 (creates the game):
+.venv/bin/python3 run.py --remote-host ws://SERVER:PORT/sc2api --race terran
+
+# Player 2 (joins the game — use the host-ip printed by server.py):
+.venv/bin/python3 run.py --remote-join ws://SERVER:PORT/sc2api --host-ip SERVER --race zerg
+```
+
+The `--host-ip` tells SC2 where the game-hosting instance lives so the two SC2 instances can sync with each other. For `--remote-host` it's auto-derived from the WebSocket URL; for `--remote-join` it must be specified explicitly.
+
+Both players edit `bot.py` locally with full hot-reload, same as single-player mode.
+
+#### server.py options
+
+```
+--instances N   Number of SC2 instances to launch (default: 2)
+--verbose, -v   Enable debug logging
+```
