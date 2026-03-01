@@ -99,10 +99,11 @@ class EventLog:
 
 
 class Dashboard:
-    def __init__(self, bot, *, map_name: str = "", opponent_info: str = ""):
+    def __init__(self, bot, *, map_name: str = "", opponent_info: str = "", state_writer=None):
         self.bot = bot
         self.map_name = map_name
         self.opponent_info = opponent_info
+        self.state_writer = state_writer
 
         self.event_log = EventLog()
         self.last_error: str | None = None
@@ -161,7 +162,7 @@ class Dashboard:
         self.stop()
 
     def log(self, category: str, message: str):
-        """Add a sticky event to the log."""
+        """Add a sticky event to the dashboard log and state file."""
         try:
             game_time = self.bot.time_formatted
             current_time = self.bot.time
@@ -169,12 +170,16 @@ class Dashboard:
             game_time = "--:--"
             current_time = 0.0
         self.event_log.add(game_time, category, message, current_time)
+        if self.state_writer:
+            self.state_writer.log_event(game_time, category, message)
 
     def set_error(self, error_text: str | None, *, tick: int | None = None, game_time: str | None = None):
         self.last_error = error_text
         if error_text is not None:
             self.last_error_tick = tick
             self.last_error_time = game_time
+            if self.state_writer:
+                self.state_writer.log_error(error_text, tick=tick, game_time=game_time)
         else:
             self.last_error_tick = None
             self.last_error_time = None
@@ -235,6 +240,12 @@ class Dashboard:
         self._render_count += 1
         if self._render_count % 5 != 1 and self._render_count > 1:
             return
+
+        if self.state_writer:
+            try:
+                self.state_writer.update(iteration)
+            except Exception:
+                pass
 
         try:
             self.event_log.prune(self.bot.time)

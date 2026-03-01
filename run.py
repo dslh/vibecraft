@@ -45,6 +45,7 @@ from sc2.player import Bot, Computer, Human
 from sc2.sc2process import SC2Process
 
 from dashboard import Dashboard
+from state_writer import StateWriter
 from ports import DEFAULT_BASE_PORT, make_portconfig
 
 # Bot code package — hot-reloaded from the bot_src/ directory.
@@ -76,10 +77,17 @@ class HarnessBot(BotAI):
         self._lb = None
 
     async def on_start(self):
+        state_writer = StateWriter(
+            self,
+            map_name=self._map_name,
+            opponent_info=self._opponent_info,
+        )
+        state_writer.start()
         self.dashboard = Dashboard(
             self,
             map_name=self._map_name,
             opponent_info=self._opponent_info,
+            state_writer=state_writer,
         )
         self.dashboard.start()
 
