@@ -38,6 +38,7 @@ from sc2.main import _play_game_ai, run_game
 from sc2.player import Bot, Computer, Human
 from sc2.sc2process import SC2Process
 
+from dashboard import Dashboard
 from ports import DEFAULT_BASE_PORT, make_portconfig
 
 # The bot module to hot-reload. Lives next to this file.
@@ -50,20 +51,39 @@ DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
 
 class HarnessBot(BotAI):
 
+    # Set by main() before the game starts so the dashboard can display them.
+    _map_name: str = ""
+    _opponent_info: str = ""
+
     def __init__(self):
         super().__init__()
         self.memory = {}
         self._bot_module = None
         self._bot_mtime = 0.0
         self._last_error = None
+        self.dashboard: Dashboard | None = None
+
+    async def on_start(self):
+        self.dashboard = Dashboard(
+            self,
+            map_name=self._map_name,
+            opponent_info=self._opponent_info,
+        )
+        self.dashboard.start()
 
     async def on_step(self, iteration: int):
+        dash = self.dashboard
+
         # Hot-reload bot.py if it changed on disk (or on first load)
         try:
             mtime = os.path.getmtime(BOT_MODULE_PATH)
         except OSError:
             if self._last_error != "missing":
-                print(f"[harness] bot.py not found at {BOT_MODULE_PATH}")
+                msg = f"bot.py not found at {BOT_MODULE_PATH}"
+                if dash:
+                    dash.log("harness", msg)
+                else:
+                    print(f"[harness] {msg}")
                 self._last_error = "missing"
             return
 
@@ -75,11 +95,22 @@ class HarnessBot(BotAI):
                 else:
                     self._bot_module = importlib.import_module(BOT_MODULE_NAME)
                 self._last_error = None
-                print(f"[harness] Reloaded bot.py (tick {iteration}, {self.time_formatted})")
+                msg = f"Reloaded bot.py (tick {iteration}, {self.time_formatted})"
+                if dash:
+                    dash.set_error(None)
+                    dash.last_reload_time = self.time_formatted
+                    dash.log("harness", msg)
+                else:
+                    print(f"[harness] {msg}")
             except Exception:
                 self._last_error = "load"
-                print(f"[harness] Failed to load bot.py:")
-                traceback.print_exc()
+                tb = traceback.format_exc()
+                if dash:
+                    dash.set_error(tb)
+                    dash.log("error", "Failed to load bot.py")
+                else:
+                    print(f"[harness] Failed to load bot.py:")
+                    traceback.print_exc()
                 return
 
         if self._bot_module is None:
@@ -88,7 +119,11 @@ class HarnessBot(BotAI):
         play_fn = getattr(self._bot_module, "play", None)
         if play_fn is None:
             if self._last_error != "no_play":
-                print("[harness] No play() function found in bot.py")
+                msg = "No play() function found in bot.py"
+                if dash:
+                    dash.log("harness", msg)
+                else:
+                    print(f"[harness] {msg}")
                 self._last_error = "no_play"
             return
 
@@ -98,11 +133,46 @@ class HarnessBot(BotAI):
             if inspect.isawaitable(result):
                 await result
         except Exception:
-            print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
-            traceback.print_exc()
+            tb = traceback.format_exc()
+            if dash:
+                dash.set_error(tb)
+            else:
+                print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
+                traceback.print_exc()
+
+        # Update dashboard at end of tick
+        if dash:
+            dash.update(iteration)
 
     async def on_end(self, game_result: Result):
+        if self.dashboard:
+            self.dashboard.log("harness", f"Game ended: {game_result}")
+            # Final render so the user sees the end state briefly
+            self.dashboard.update(0)
+            import time
+            time.sleep(1.5)
+            self.dashboard.stop()
         print(f"[harness] Game ended: {game_result}")
+
+    async def on_unit_destroyed(self, unit_tag: int):
+        if self.dashboard:
+            self.dashboard.on_unit_destroyed(unit_tag)
+
+    async def on_unit_took_damage(self, unit, amount_damage_taken: float):
+        if self.dashboard:
+            self.dashboard.on_unit_took_damage(unit, amount_damage_taken)
+
+    async def on_building_construction_complete(self, unit):
+        if self.dashboard:
+            self.dashboard.on_building_construction_complete(unit)
+
+    async def on_upgrade_complete(self, upgrade):
+        if self.dashboard:
+            self.dashboard.on_upgrade_complete(upgrade)
+
+    async def on_enemy_unit_entered_vision(self, unit):
+        if self.dashboard:
+            self.dashboard.on_enemy_unit_entered_vision(unit)
 
 
 def get_lan_ip() -> str:
@@ -392,14 +462,19 @@ def main():
         asyncio.run(join_lan_game(args.join, bot_race, args.base_port, args.players))
         return
 
+    harness_bot = HarnessBot()
+    harness_bot._map_name = args.map
+
     if args.human:
         human_race = RACE_MAP[args.human]
-        players = [Human(human_race), Bot(bot_race, HarnessBot())]
+        harness_bot._opponent_info = f"Human {human_race.name}"
+        players = [Human(human_race), Bot(bot_race, harness_bot)]
         print(f"[harness] Starting: You ({human_race.name}) vs Bot ({bot_race.name}) on {args.map}")
     else:
         enemy_race = RACE_MAP[args.enemy_race]
         difficulty = DIFFICULTY_MAP[args.difficulty]
-        players = [Bot(bot_race, HarnessBot()), Computer(enemy_race, difficulty)]
+        harness_bot._opponent_info = f"{difficulty.name} {enemy_race.name}"
+        players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
         print(f"[harness] Starting: Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")
 
     print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
