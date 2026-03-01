@@ -106,7 +106,7 @@ class HarnessBot(BotAI):
                 self._last_error = "load"
                 tb = traceback.format_exc()
                 if dash:
-                    dash.set_error(tb)
+                    dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
                     dash.log("error", "Failed to load bot.py")
                 else:
                     print(f"[harness] Failed to load bot.py:")
@@ -135,7 +135,7 @@ class HarnessBot(BotAI):
         except Exception:
             tb = traceback.format_exc()
             if dash:
-                dash.set_error(tb)
+                dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
             else:
                 print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
                 traceback.print_exc()

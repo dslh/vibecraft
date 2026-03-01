@@ -8,7 +8,12 @@ updated each game tick from on_step().
 from __future__ import annotations
 
 import atexit
+import select
+import subprocess
+import sys
+import termios
 import traceback
+import tty
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
@@ -94,6 +99,8 @@ class Dashboard:
 
         self.event_log = EventLog()
         self.last_error: str | None = None
+        self.last_error_tick: int | None = None
+        self.last_error_time: str | None = None
         self.last_reload_time: str = ""
 
         self._console = Console()
@@ -101,10 +108,14 @@ class Dashboard:
         self._render_count = 0
         self._seen_enemy_types: set[UnitTypeId] = set()
         self._damage_cooldowns: dict[int, float] = {}  # unit_tag -> next report time
+        self._error_expanded = False
 
         # Creep calculation cache
         self._creep_pct: float = 0.0
         self._creep_tick: int = -100
+
+        # Terminal raw mode state
+        self._old_term_settings = None
 
     def start(self):
         layout = self._make_layout()
@@ -116,8 +127,21 @@ class Dashboard:
         )
         self._live.start()
         atexit.register(self._atexit_cleanup)
+        # Put stdin in raw mode so we can read single keypresses without blocking
+        try:
+            self._old_term_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except Exception:
+            self._old_term_settings = None
 
     def stop(self):
+        # Restore terminal settings before stopping Live
+        if self._old_term_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_term_settings)
+            except Exception:
+                pass
+            self._old_term_settings = None
         if self._live is not None:
             try:
                 self._live.stop()
@@ -138,15 +162,51 @@ class Dashboard:
             current_time = 0.0
         self.event_log.add(game_time, category, message, current_time)
 
-    def set_error(self, error_text: str | None):
+    def set_error(self, error_text: str | None, *, tick: int | None = None, game_time: str | None = None):
         self.last_error = error_text
+        if error_text is not None:
+            self.last_error_tick = tick
+            self.last_error_time = game_time
+        else:
+            self.last_error_tick = None
+            self.last_error_time = None
+            self._error_expanded = False
+
+    def _poll_keys(self):
+        """Non-blocking check for keypresses. Call each render tick."""
+        try:
+            while select.select([sys.stdin], [], [], 0)[0]:
+                ch = sys.stdin.read(1)
+                if ch == "e":
+                    if self.last_error:
+                        self._error_expanded = not self._error_expanded
+                elif ch == "c":
+                    if self.last_error:
+                        self._copy_error_to_clipboard()
+        except Exception:
+            pass
+
+    def _copy_error_to_clipboard(self):
+        try:
+            subprocess.run(
+                ["pbcopy"],
+                input=self.last_error.encode(),
+                check=True,
+                timeout=2,
+            )
+            self.log("harness", "Error copied to clipboard")
+        except Exception:
+            self.log("harness", "Failed to copy to clipboard")
 
     def update(self, iteration: int):
         """Rebuild and render the dashboard. Call every tick (throttled internally)."""
         if self._live is None:
             return
 
-        # Throttle: render every 5th tick
+        # Always poll keys so input doesn't buffer up
+        self._poll_keys()
+
+        # Throttle rendering: every 5th tick
         self._render_count += 1
         if self._render_count % 5 != 1 and self._render_count > 1:
             return
@@ -200,30 +260,39 @@ class Dashboard:
 
     def _make_layout(self) -> Layout:
         layout = Layout(name="root")
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="body", ratio=1),
-            Layout(name="events", size=8),
-            Layout(name="error", size=4),
-        )
-        layout["body"].split_row(
-            Layout(name="left", ratio=1),
-            Layout(name="center", ratio=1),
-            Layout(name="right", ratio=1),
-        )
-        layout["left"].split_column(
-            Layout(name="economy", ratio=2),
-            Layout(name="production", ratio=2),
-            Layout(name="upgrades", ratio=1),
-        )
-        layout["center"].split_column(
-            Layout(name="army", ratio=3),
-            Layout(name="mapinfo", ratio=1),
-        )
-        layout["right"].split_column(
-            Layout(name="enemy_units", ratio=1),
-            Layout(name="enemy_structures", ratio=1),
-        )
+
+        if self._error_expanded and self.last_error:
+            # Expanded: header + full error panel
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="error", ratio=1),
+            )
+        else:
+            # Normal: full dashboard with compact error
+            layout.split_column(
+                Layout(name="header", size=3),
+                Layout(name="body", ratio=1),
+                Layout(name="events", size=8),
+                Layout(name="error", size=4),
+            )
+            layout["body"].split_row(
+                Layout(name="left", ratio=1),
+                Layout(name="center", ratio=1),
+                Layout(name="right", ratio=1),
+            )
+            layout["left"].split_column(
+                Layout(name="economy", ratio=2),
+                Layout(name="production", ratio=2),
+                Layout(name="upgrades", ratio=1),
+            )
+            layout["center"].split_column(
+                Layout(name="army", ratio=3),
+                Layout(name="mapinfo", ratio=1),
+            )
+            layout["right"].split_column(
+                Layout(name="enemy_units", ratio=1),
+                Layout(name="enemy_structures", ratio=1),
+            )
         return layout
 
     def _fill_layout(self, layout: Layout, iteration: int):
@@ -231,6 +300,11 @@ class Dashboard:
 
         # Header
         layout["header"].update(self._build_header(bot, iteration))
+
+        if self._error_expanded and self.last_error:
+            # Expanded error takes over the body
+            layout["error"].update(self._build_error())
+            return
 
         # Left column
         layout["economy"].update(self._build_economy(bot))
@@ -430,9 +504,29 @@ class Dashboard:
 
     def _build_error(self) -> Panel:
         if self.last_error:
+            # Build title with tick/time context
+            title_parts = ["Error"]
+            if self.last_error_time:
+                title_parts.append(self.last_error_time)
+            if self.last_error_tick is not None:
+                title_parts.append(f"tick {self.last_error_tick}")
+            title = " @ ".join(title_parts)
+
+            if self._error_expanded:
+                # Full traceback
+                content = Text(self.last_error, style="red")
+                subtitle = "[dim]\\[e] collapse  \\[c] copy[/dim]"
+            else:
+                # Compact: show last few lines (the exception is always at the tail)
+                lines = self.last_error.rstrip().split("\n")
+                tail = "\n".join(lines[-3:])
+                content = Text(tail, style="red")
+                subtitle = "[dim]\\[e] expand  \\[c] copy[/dim]"
+
             return Panel(
-                Text(self.last_error[-300:], style="red"),
-                title="Error",
+                content,
+                title=title,
+                subtitle=subtitle,
                 border_style="red",
             )
         return Panel(Text("(no errors)", style="dim green"), title="Error")
