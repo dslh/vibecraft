@@ -3,6 +3,7 @@ SC2 Bot Harness — hot-reloads bot.py on every game tick.
 
 Usage:
     python run.py [--map MAP_NAME] [--race RACE] [--difficulty DIFFICULTY]
+    python run.py --gauntlet [--prep-time 10]     # escalate VeryEasy → VeryHard
     python run.py --human protoss --race zerg     # play against your own bot
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
@@ -23,6 +24,7 @@ import inspect
 import os
 import socket
 import sys
+import time
 import traceback
 from urllib.parse import urlparse
 
@@ -47,6 +49,10 @@ BOT_MODULE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.
 
 RACE_MAP = {r.name.lower(): r for r in Race}
 DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
+GAUNTLET_DIFFICULTIES = [
+    Difficulty.VeryEasy, Difficulty.Easy, Difficulty.Medium,
+    Difficulty.MediumHard, Difficulty.Hard, Difficulty.Harder, Difficulty.VeryHard,
+]
 
 
 class HarnessBot(BotAI):
@@ -149,7 +155,6 @@ class HarnessBot(BotAI):
             self.dashboard.log("harness", f"Game ended: {game_result}")
             # Final render so the user sees the end state briefly
             self.dashboard.update(0)
-            import time
             time.sleep(1.5)
             self.dashboard.stop()
         print(f"[harness] Game ended: {game_result}")
@@ -346,6 +351,52 @@ async def remote_join_game(
         await session.close()
 
 
+def prep_countdown(seconds, label):
+    from rich.console import Console
+    from rich.text import Text
+    from rich.live import Live
+
+    console = Console()
+    with Live(console=console, refresh_per_second=2) as live:
+        for remaining in range(seconds, 0, -1):
+            live.update(Text(f"  {label} — starting in {remaining}s ", style="bold yellow"))
+            time.sleep(1)
+        live.update(Text(f"  {label} — GO! ", style="bold green"))
+        time.sleep(0.5)
+
+
+def run_gauntlet(args, bot_race):
+    enemy_race = RACE_MAP[args.enemy_race]
+    total = len(GAUNTLET_DIFFICULTIES)
+
+    print(f"[gauntlet] Starting gauntlet: {total} rounds, VeryEasy → VeryHard")
+    print(f"[gauntlet] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    print()
+
+    for round_num, difficulty in enumerate(GAUNTLET_DIFFICULTIES, 1):
+        harness_bot = HarnessBot()
+        harness_bot._map_name = args.map
+        harness_bot._opponent_info = f"Gauntlet R{round_num}: {difficulty.name} {enemy_race.name}"
+
+        if args.prep_time > 0:
+            label = f"Round {round_num}/{total}: {difficulty.name} {enemy_race.name}"
+            prep_countdown(args.prep_time, label)
+
+        print(f"[gauntlet] Round {round_num}/{total}: "
+              f"Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")
+
+        players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
+        result = run_game(maps.get(args.map), players, realtime=True)
+
+        if result == Result.Victory:
+            print(f"[gauntlet] Round {round_num} WON!")
+        else:
+            print(f"[gauntlet] Gauntlet ended at round {round_num} ({difficulty.name}): {result.name}")
+            return
+
+    print(f"[gauntlet] GAUNTLET COMPLETE! All {total} rounds won!")
+
+
 def main():
     parser = argparse.ArgumentParser(description="SC2 Bot Harness with hot-reload")
     parser.add_argument("--map", default="Simple64", help="Map name (default: Simple64)")
@@ -368,6 +419,18 @@ def main():
         default="random",
         choices=list(RACE_MAP.keys()),
         help="Enemy race (ignored in --human mode)",
+    )
+    parser.add_argument(
+        "--gauntlet",
+        action="store_true",
+        help="Gauntlet mode: escalate difficulty from VeryEasy to VeryHard, stopping on first loss",
+    )
+    parser.add_argument(
+        "--prep-time",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="Countdown before each game starts (computer games only)",
     )
     parser.add_argument(
         "--host",
@@ -436,6 +499,9 @@ def main():
 
     bot_race = RACE_MAP[args.race]
 
+    if args.gauntlet and args.human:
+        parser.error("--gauntlet cannot be used with --human")
+
     if args.remote_host:
         host_ip = args.host_ip
         if not host_ip:
@@ -462,6 +528,10 @@ def main():
         asyncio.run(join_lan_game(args.join, bot_race, args.base_port, args.players))
         return
 
+    if args.gauntlet:
+        run_gauntlet(args, bot_race)
+        return
+
     harness_bot = HarnessBot()
     harness_bot._map_name = args.map
 
@@ -479,6 +549,9 @@ def main():
 
     print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
     print()
+
+    if args.prep_time > 0 and not args.human:
+        prep_countdown(args.prep_time, f"{args.map}: {difficulty.name} {enemy_race.name}")
 
     run_game(
         maps.get(args.map),
