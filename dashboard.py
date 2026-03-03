@@ -8,12 +8,19 @@ updated each game tick from on_step().
 from __future__ import annotations
 
 import atexit
-import select
+import platform
 import subprocess
 import sys
-import termios
 import traceback
-import tty
+
+_IS_WINDOWS = platform.system() == "Windows"
+
+if _IS_WINDOWS:
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
@@ -128,15 +135,16 @@ class Dashboard:
         self._live.start()
         atexit.register(self._atexit_cleanup)
         # Put stdin in raw mode so we can read single keypresses without blocking
-        try:
-            self._old_term_settings = termios.tcgetattr(sys.stdin)
-            tty.setcbreak(sys.stdin.fileno())
-        except Exception:
-            self._old_term_settings = None
+        if not _IS_WINDOWS:
+            try:
+                self._old_term_settings = termios.tcgetattr(sys.stdin)
+                tty.setcbreak(sys.stdin.fileno())
+            except Exception:
+                self._old_term_settings = None
 
     def stop(self):
         # Restore terminal settings before stopping Live
-        if self._old_term_settings is not None:
+        if not _IS_WINDOWS and self._old_term_settings is not None:
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_term_settings)
             except Exception:
@@ -175,21 +183,38 @@ class Dashboard:
     def _poll_keys(self):
         """Non-blocking check for keypresses. Call each render tick."""
         try:
-            while select.select([sys.stdin], [], [], 0)[0]:
-                ch = sys.stdin.read(1)
-                if ch == "e":
-                    if self.last_error:
-                        self._error_expanded = not self._error_expanded
-                elif ch == "c":
-                    if self.last_error:
-                        self._copy_error_to_clipboard()
+            if _IS_WINDOWS:
+                while msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch == "e":
+                        if self.last_error:
+                            self._error_expanded = not self._error_expanded
+                    elif ch == "c":
+                        if self.last_error:
+                            self._copy_error_to_clipboard()
+            else:
+                while select.select([sys.stdin], [], [], 0)[0]:
+                    ch = sys.stdin.read(1)
+                    if ch == "e":
+                        if self.last_error:
+                            self._error_expanded = not self._error_expanded
+                    elif ch == "c":
+                        if self.last_error:
+                            self._copy_error_to_clipboard()
         except Exception:
             pass
 
     def _copy_error_to_clipboard(self):
+        pf = platform.system()
+        if pf == "Darwin":
+            cmd = ["pbcopy"]
+        elif pf == "Windows":
+            cmd = ["clip.exe"]
+        else:
+            cmd = ["xclip", "-selection", "clipboard"]
         try:
             subprocess.run(
-                ["pbcopy"],
+                cmd,
                 input=self.last_error.encode(),
                 check=True,
                 timeout=2,
