@@ -132,3 +132,33 @@ Both players edit `bot.py` locally with full hot-reload, same as single-player m
 --instances N   Number of SC2 instances to launch (default: 2)
 --verbose, -v   Enable debug logging
 ```
+
+### Gauntlet mode
+
+Play 7 escalating rounds (VeryEasy → VeryHard). Losses retry the same difficulty until you win or Ctrl+C:
+
+```bash
+.venv/bin/python3 run.py --gauntlet --race terran
+```
+
+Add a countdown between rounds:
+
+```bash
+.venv/bin/python3 run.py --gauntlet --race terran --prep-time 10
+```
+
+### Multiplayer gauntlet (leaderboard)
+
+Run a [leaderboard server](../leaderboard/) and connect multiple players for a synchronized race through the gauntlet. Each player runs their own gauntlet against the AI — the leaderboard tracks who gets furthest, fastest.
+
+```bash
+# On the server:
+python ../leaderboard/server.py --prep-time 10
+
+# Each player:
+.venv/bin/python3 run.py --gauntlet --leaderboard HOST:8080 --name alice --race terran
+```
+
+Players connect and appear in the lobby. The operator presses Enter to start everyone simultaneously. A live web dashboard at `http://HOST:8080` shows standings.
+
+If a player disconnects and reconnects with the same `--name`, they resume from where they left off. If the leaderboard server goes down, games continue uninterrupted.

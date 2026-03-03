@@ -4,6 +4,7 @@ SC2 Bot Harness — hot-reloads bot.py on every game tick.
 Usage:
     python run.py [--map MAP_NAME] [--race RACE] [--difficulty DIFFICULTY]
     python run.py --gauntlet [--prep-time 10]     # escalate VeryEasy → VeryHard
+    python run.py --gauntlet --leaderboard HOST:PORT --name alice  # multiplayer gauntlet
     python run.py --human protoss --race zerg     # play against your own bot
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
@@ -369,32 +370,101 @@ def run_gauntlet(args, bot_race):
     enemy_race = RACE_MAP[args.enemy_race]
     total = len(GAUNTLET_DIFFICULTIES)
 
+    # Leaderboard integration
+    lb = None
+    if args.leaderboard:
+        from leaderboard_client import LeaderboardClient
+        name = args.name or socket.gethostname().split(".")[0]
+        lb = LeaderboardClient(
+            args.leaderboard,
+            name=name,
+            race=bot_race.name,
+            map_name=args.map,
+        )
+        lb.start()
+        print(f"[gauntlet] Connecting to leaderboard at {args.leaderboard} as '{name}'...")
+        lb.wait_for_go()
+
+    start_round = 0
+    elapsed_offset = 0.0
+
+    # Handle reconnection resume
+    if lb and lb.resume_round is not None:
+        start_round = lb.resume_round
+        elapsed_offset = lb.elapsed_before
+
+    # Prep time: server's value overrides local --prep-time when connected
+    prep_time = lb.prep_time if lb else args.prep_time
+
+    gauntlet_start = time.time()
+
     print(f"[gauntlet] Starting gauntlet: {total} rounds, VeryEasy → VeryHard")
     print(f"[gauntlet] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    if start_round > 0:
+        print(f"[gauntlet] Resuming from round {start_round + 1}")
     print()
 
-    for round_num, difficulty in enumerate(GAUNTLET_DIFFICULTIES, 1):
-        harness_bot = HarnessBot()
-        harness_bot._map_name = args.map
-        harness_bot._opponent_info = f"Gauntlet R{round_num}: {difficulty.name} {enemy_race.name}"
+    round_idx = start_round
+    try:
+        while round_idx < total:
+            difficulty = GAUNTLET_DIFFICULTIES[round_idx]
+            round_num = round_idx + 1
+            elapsed = elapsed_offset + (time.time() - gauntlet_start)
 
-        if args.prep_time > 0:
-            label = f"Round {round_num}/{total}: {difficulty.name} {enemy_race.name}"
-            prep_countdown(args.prep_time, label)
+            harness_bot = HarnessBot()
+            harness_bot._map_name = args.map
+            harness_bot._opponent_info = f"Gauntlet R{round_num}: {difficulty.name} {enemy_race.name}"
 
-        print(f"[gauntlet] Round {round_num}/{total}: "
-              f"Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")
+            if lb:
+                lb.send_status(
+                    round_idx=round_idx,
+                    difficulty=difficulty.name,
+                    state="playing",
+                    elapsed=elapsed,
+                )
 
-        players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
-        result = run_game(maps.get(args.map), players, realtime=True)
+            if prep_time > 0:
+                label = f"Round {round_num}/{total}: {difficulty.name} {enemy_race.name}"
+                prep_countdown(prep_time, label)
 
-        if result == Result.Victory:
-            print(f"[gauntlet] Round {round_num} WON!")
-        else:
-            print(f"[gauntlet] Gauntlet ended at round {round_num} ({difficulty.name}): {result.name}")
-            return
+            print(f"[gauntlet] Round {round_num}/{total}: "
+                  f"Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")
 
-    print(f"[gauntlet] GAUNTLET COMPLETE! All {total} rounds won!")
+            game_start = time.time()
+            players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
+            result = run_game(maps.get(args.map), players, realtime=True)
+            game_time = time.time() - game_start
+            elapsed = elapsed_offset + (time.time() - gauntlet_start)
+
+            if lb:
+                lb.send_round_complete(
+                    round_idx=round_idx,
+                    difficulty=difficulty.name,
+                    result=result.name if result else "Unknown",
+                    game_time=game_time,
+                    elapsed=elapsed,
+                )
+
+            if result == Result.Victory:
+                print(f"[gauntlet] Round {round_num} WON!")
+                round_idx += 1
+            else:
+                print(f"[gauntlet] Round {round_num} lost. Retrying {difficulty.name}...")
+                # don't increment — retry same level
+
+        print(f"[gauntlet] GAUNTLET COMPLETE! All {total} rounds won!")
+    finally:
+        if lb:
+            elapsed = elapsed_offset + (time.time() - gauntlet_start)
+            lb.send_status(
+                round_idx=min(round_idx, total - 1),
+                difficulty=GAUNTLET_DIFFICULTIES[min(round_idx, total - 1)].name,
+                state="completed" if round_idx >= total else "disconnected",
+                elapsed=elapsed,
+            )
+            # Give the send a moment to flush
+            time.sleep(0.5)
+            lb.close()
 
 
 def main():
@@ -431,6 +501,17 @@ def main():
         default=0,
         metavar="SECONDS",
         help="Countdown before each game starts (computer games only)",
+    )
+    parser.add_argument(
+        "--leaderboard",
+        default=None,
+        metavar="HOST:PORT",
+        help="Connect to a leaderboard server for multiplayer gauntlet (e.g. localhost:8080)",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Player name for the leaderboard (default: hostname)",
     )
     parser.add_argument(
         "--host",
@@ -501,6 +582,8 @@ def main():
 
     if args.gauntlet and args.human:
         parser.error("--gauntlet cannot be used with --human")
+    if args.leaderboard and not args.gauntlet:
+        parser.error("--leaderboard requires --gauntlet")
 
     if args.remote_host:
         host_ip = args.host_ip
