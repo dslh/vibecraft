@@ -20,6 +20,7 @@ logs the error and skips that tick — the game keeps running.
 
 import argparse
 import asyncio
+import base64
 import importlib
 import inspect
 import os
@@ -28,6 +29,8 @@ import sys
 import time
 import traceback
 from urllib.parse import urlparse
+
+import numpy as np
 
 import aiohttp
 from loguru import logger
@@ -69,6 +72,7 @@ class HarnessBot(BotAI):
         self._bot_mtime = 0.0
         self._last_error = None
         self.dashboard: Dashboard | None = None
+        self._lb = None
 
     async def on_start(self):
         self.dashboard = Dashboard(
@@ -77,6 +81,18 @@ class HarnessBot(BotAI):
             opponent_info=self._opponent_info,
         )
         self.dashboard.start()
+
+        if self._lb:
+            gi = self.game_info
+            pa = gi.playable_area
+            terrain_b64 = base64.b64encode(
+                np.packbits(gi.pathing_grid.data_numpy).tobytes()
+            ).decode("ascii")
+            self._lb.send_minimap_init(
+                map_size=[gi.map_size.x, gi.map_size.y],
+                playable=[pa.x, pa.y, pa.width, pa.height],
+                terrain=terrain_b64,
+            )
 
     async def on_step(self, iteration: int):
         dash = self.dashboard
@@ -150,6 +166,30 @@ class HarnessBot(BotAI):
         # Update dashboard at end of tick
         if dash:
             dash.update(iteration)
+
+        # Send minimap data to leaderboard (~every 22 ticks / ~1s)
+        if True:
+            units = []
+            for u in self.units:
+                units.append([round(u.position.x, 1), round(u.position.y, 1), 0])
+            for s in self.structures:
+                units.append([round(s.position.x, 1), round(s.position.y, 1), 1])
+            for u in self.enemy_units:
+                units.append([round(u.position.x, 1), round(u.position.y, 1), 2])
+            for s in self.enemy_structures:
+                units.append([round(s.position.x, 1), round(s.position.y, 1), 3])
+            for m in self.mineral_field:
+                units.append([round(m.position.x, 1), round(m.position.y, 1), 4])
+            for g in self.vespene_geyser:
+                units.append([round(g.position.x, 1), round(g.position.y, 1), 5])
+            # Pack visibility grid: 2 bits per cell (0=hidden, 1=fogged, 2=visible)
+            vis = self.state.visibility.data_numpy.flatten()
+            pad = (-len(vis)) % 4
+            if pad:
+                vis = np.concatenate([vis, np.zeros(pad, dtype=np.uint8)])
+            packed = (vis[0::4] << 6) | (vis[1::4] << 4) | (vis[2::4] << 2) | vis[3::4]
+            vis_b64 = base64.b64encode(packed.astype(np.uint8).tobytes()).decode("ascii")
+            self._lb.send_minimap(units=units, visibility=vis_b64)
 
     async def on_end(self, game_result: Result):
         if self.dashboard:
@@ -386,17 +426,16 @@ def run_gauntlet(args, bot_race):
         lb.wait_for_go()
 
     start_round = 0
-    elapsed_offset = 0.0
+    # winning_time: cumulative game time of victories only (used for ranking)
+    winning_time = 0.0
 
     # Handle reconnection resume
     if lb and lb.resume_round is not None:
         start_round = lb.resume_round
-        elapsed_offset = lb.elapsed_before
+        winning_time = lb.elapsed_before
 
     # Prep time: server's value overrides local --prep-time when connected
     prep_time = lb.prep_time if lb else args.prep_time
-
-    gauntlet_start = time.time()
 
     print(f"[gauntlet] Starting gauntlet: {total} rounds, VeryEasy → VeryHard")
     print(f"[gauntlet] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
@@ -409,18 +448,18 @@ def run_gauntlet(args, bot_race):
         while round_idx < total:
             difficulty = GAUNTLET_DIFFICULTIES[round_idx]
             round_num = round_idx + 1
-            elapsed = elapsed_offset + (time.time() - gauntlet_start)
 
             harness_bot = HarnessBot()
             harness_bot._map_name = args.map
             harness_bot._opponent_info = f"Gauntlet R{round_num}: {difficulty.name} {enemy_race.name}"
 
             if lb:
+                harness_bot._lb = lb
                 lb.send_status(
                     round_idx=round_idx,
                     difficulty=difficulty.name,
                     state="playing",
-                    elapsed=elapsed,
+                    elapsed=winning_time,
                 )
 
             if prep_time > 0:
@@ -434,33 +473,32 @@ def run_gauntlet(args, bot_race):
             players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
             result = run_game(maps.get(args.map), players, realtime=True)
             game_time = time.time() - game_start
-            elapsed = elapsed_offset + (time.time() - gauntlet_start)
-
-            if lb:
-                lb.send_round_complete(
-                    round_idx=round_idx,
-                    difficulty=difficulty.name,
-                    result=result.name if result else "Unknown",
-                    game_time=game_time,
-                    elapsed=elapsed,
-                )
 
             if result == Result.Victory:
+                winning_time += game_time
                 print(f"[gauntlet] Round {round_num} WON!")
                 round_idx += 1
             else:
                 print(f"[gauntlet] Round {round_num} lost. Retrying {difficulty.name}...")
                 # don't increment — retry same level
 
+            if lb:
+                lb.send_round_complete(
+                    round_idx=round_idx if result == Result.Victory else round_idx,
+                    difficulty=difficulty.name,
+                    result=result.name if result else "Unknown",
+                    game_time=game_time,
+                    elapsed=winning_time,
+                )
+
         print(f"[gauntlet] GAUNTLET COMPLETE! All {total} rounds won!")
     finally:
         if lb:
-            elapsed = elapsed_offset + (time.time() - gauntlet_start)
             lb.send_status(
                 round_idx=min(round_idx, total - 1),
                 difficulty=GAUNTLET_DIFFICULTIES[min(round_idx, total - 1)].name,
                 state="completed" if round_idx >= total else "disconnected",
-                elapsed=elapsed,
+                elapsed=winning_time,
             )
             # Give the send a moment to flush
             time.sleep(0.5)

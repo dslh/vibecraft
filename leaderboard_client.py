@@ -154,6 +154,23 @@ class LeaderboardClient:
             "elapsed": elapsed,
         })
 
+    def send_minimap_init(self, *, map_size: list, playable: list, terrain: str):
+        """Send map geometry and terrain data so the server/dashboard can render the minimap."""
+        self._send({
+            "type": "minimap_init",
+            "map_size": map_size,
+            "playable": playable,
+            "terrain": terrain,
+        })
+
+    def send_minimap(self, *, units: list, visibility: str):
+        """Send unit positions and fog-of-war for the live minimap overlay."""
+        self._send({
+            "type": "minimap",
+            "units": units,
+            "visibility": visibility,
+        })
+
     def _send(self, data: dict):
         """Thread-safe send via the background event loop."""
         if not self._connected or self._loop is None or self._ws is None:
