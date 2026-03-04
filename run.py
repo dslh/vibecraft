@@ -168,7 +168,7 @@ class HarnessBot(BotAI):
             dash.update(iteration)
 
         # Send minimap data to leaderboard (~every 22 ticks / ~1s)
-        if True:
+        if self._lb:
             units = []
             for u in self.units:
                 units.append([round(u.position.x, 1), round(u.position.y, 1), 0])
