@@ -38,14 +38,16 @@ Melee pack (installed in `Maps/Melee/`):
 
 `run.py` launches SC2 in realtime mode and runs a `HarnessBot` that, on every game tick:
 
-1. Checks if `bot.py` has been modified on disk
-2. If so, hot-reloads it via `importlib.reload()`
-3. Calls your `play(bot, memory)` function
+1. Scans all `.py` files in `bot_src/` for changes (by mtime)
+2. If any file changed, purges all `bot_src` modules from memory and re-imports fresh
+3. Calls your `play(bot, memory)` function from `bot_src/bot.py`
 4. Catches exceptions gracefully — a syntax error or crash skips that tick, the game keeps going
+
+This means you can split your bot across as many files as you want inside `bot_src/`. Edit any file and save — all changes take effect together on the next tick.
 
 ## Writing your bot
 
-All your logic goes in `bot.py`. Implement one function:
+Your bot code lives in `bot_src/`. The entry point is `bot_src/bot.py`, which must define:
 
 ```python
 def play(bot, memory):
@@ -86,6 +88,32 @@ def play(bot, memory):
 
 `play()` can also be `async` if you need python-sc2's async methods (e.g. `find_placement`).
 
+### Splitting your bot across files
+
+As your bot grows, split logic into separate modules inside `bot_src/`:
+
+```
+bot_src/
+  __init__.py
+  bot.py          # entry point — defines play()
+  economy.py      # economy management
+  army.py         # army control
+  strategy.py     # high-level decisions
+```
+
+Import them in `bot.py` using relative imports:
+
+```python
+from .economy import manage_economy
+from .army import manage_army
+
+def play(bot, memory):
+    manage_economy(bot, memory)
+    manage_army(bot, memory)
+```
+
+Saving any file in `bot_src/` triggers a full reload — all modules are re-imported together.
+
 ## Multiplayer
 
 ### LAN mode
@@ -124,7 +152,7 @@ This starts two SC2 instances and prints their WebSocket URLs and the commands e
 
 The `--host-ip` tells SC2 where the game-hosting instance lives so the two SC2 instances can sync with each other. For `--remote-host` it's auto-derived from the WebSocket URL; for `--remote-join` it must be specified explicitly.
 
-Both players edit `bot.py` locally with full hot-reload, same as single-player mode.
+Both players edit `bot_src/` locally with full hot-reload, same as single-player mode.
 
 #### server.py options
 

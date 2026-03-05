@@ -47,9 +47,10 @@ from sc2.sc2process import SC2Process
 from dashboard import Dashboard
 from ports import DEFAULT_BASE_PORT, make_portconfig
 
-# The bot module to hot-reload. Lives next to this file.
-BOT_MODULE_NAME = "bot"
-BOT_MODULE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.py")
+# Bot code package — hot-reloaded from the bot_src/ directory.
+BOT_PACKAGE = "bot_src"
+BOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), BOT_PACKAGE)
+BOT_ENTRY = f"{BOT_PACKAGE}.bot"  # Must define play(bot, memory)
 
 RACE_MAP = {r.name.lower(): r for r in Race}
 DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
@@ -69,7 +70,7 @@ class HarnessBot(BotAI):
         super().__init__()
         self.memory = {}
         self._bot_module = None
-        self._bot_mtime = 0.0
+        self._bot_mtimes = {}
         self._last_error = None
         self.dashboard: Dashboard | None = None
         self._lb = None
@@ -97,12 +98,10 @@ class HarnessBot(BotAI):
     async def on_step(self, iteration: int):
         dash = self.dashboard
 
-        # Hot-reload bot.py if it changed on disk (or on first load)
-        try:
-            mtime = os.path.getmtime(BOT_MODULE_PATH)
-        except OSError:
+        # Hot-reload bot code if any .py file in bot_src/ changed (or on first load)
+        if not os.path.isdir(BOT_DIR):
             if self._last_error != "missing":
-                msg = f"bot.py not found at {BOT_MODULE_PATH}"
+                msg = f"Bot source directory not found: {BOT_PACKAGE}/"
                 if dash:
                     dash.log("harness", msg)
                 else:
@@ -110,15 +109,44 @@ class HarnessBot(BotAI):
                 self._last_error = "missing"
             return
 
-        if mtime != self._bot_mtime:
-            self._bot_mtime = mtime
+        current_mtimes = {}
+        for root, dirs, files in os.walk(BOT_DIR):
+            dirs[:] = [d for d in dirs if d != "__pycache__"]
+            for f in files:
+                if f.endswith(".py"):
+                    path = os.path.join(root, f)
+                    current_mtimes[path] = os.path.getmtime(path)
+
+        if current_mtimes != self._bot_mtimes:
+            if self._bot_mtimes:
+                changed = sorted(
+                    os.path.relpath(p, BOT_DIR)
+                    for p in current_mtimes
+                    if current_mtimes.get(p) != self._bot_mtimes.get(p)
+                )
+                changed += sorted(
+                    os.path.relpath(p, BOT_DIR)
+                    for p in self._bot_mtimes
+                    if p not in current_mtimes
+                )
+            else:
+                changed = []
+            self._bot_mtimes = current_mtimes
             try:
-                if BOT_MODULE_NAME in sys.modules:
-                    self._bot_module = importlib.reload(sys.modules[BOT_MODULE_NAME])
-                else:
-                    self._bot_module = importlib.import_module(BOT_MODULE_NAME)
+                # Purge all bot package modules so imports are re-evaluated
+                to_remove = [
+                    k for k in sys.modules
+                    if k == BOT_PACKAGE or k.startswith(BOT_PACKAGE + ".")
+                ]
+                for k in to_remove:
+                    del sys.modules[k]
+                self._bot_module = importlib.import_module(BOT_ENTRY)
                 self._last_error = None
-                msg = f"Reloaded bot.py (tick {iteration}, {self.time_formatted})"
+                if changed:
+                    changed_str = ", ".join(changed)
+                    msg = f"Reloaded bot [{changed_str}] (tick {iteration}, {self.time_formatted})"
+                else:
+                    msg = f"Loaded bot code (tick {iteration}, {self.time_formatted})"
                 if dash:
                     dash.set_error(None)
                     dash.last_reload_time = self.time_formatted
@@ -130,9 +158,9 @@ class HarnessBot(BotAI):
                 tb = traceback.format_exc()
                 if dash:
                     dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
-                    dash.log("error", "Failed to load bot.py")
+                    dash.log("error", "Failed to load bot code")
                 else:
-                    print(f"[harness] Failed to load bot.py:")
+                    print(f"[harness] Failed to load bot code:")
                     traceback.print_exc()
                 return
 
@@ -142,7 +170,7 @@ class HarnessBot(BotAI):
         play_fn = getattr(self._bot_module, "play", None)
         if play_fn is None:
             if self._last_error != "no_play":
-                msg = "No play() function found in bot.py"
+                msg = f"No play() function found in {BOT_ENTRY}"
                 if dash:
                     dash.log("harness", msg)
                 else:
@@ -237,7 +265,7 @@ async def _run_lan_game(client, player_id):
     harness_bot = HarnessBot()
 
     print(f"[harness] Joined as player {player_id}. Game starting!")
-    print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    print(f"[harness] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     print()
 
     result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
@@ -668,7 +696,7 @@ def main():
         players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
         print(f"[harness] Starting: Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")
 
-    print(f"[harness] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    print(f"[harness] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     print()
 
     if args.prep_time > 0 and not args.human:
