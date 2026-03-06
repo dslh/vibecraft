@@ -94,6 +94,15 @@ class MyBot(BotAI):
             self.rush_sent = True
 ```
 
+### Logging
+
+Use `self.log()` to print messages from your bot. They show up in the dashboard Events panel and are written to `log/bot.log` with the in-game timestamp:
+
+```python
+self.log("Expanding to natural")
+self.log(f"Enemy army spotted: {self.enemy_units.amount} units")
+```
+
 ### Callbacks
 
 All standard python-sc2 callbacks are supported:

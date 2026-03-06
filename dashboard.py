@@ -72,6 +72,7 @@ _EVENT_STYLES = {
     "building": "bold cyan",
     "upgrade": "bold magenta",
     "enemy_spotted": "bold yellow",
+    "bot": "bold white",
     "harness": "dim white",
     "error": "bold red",
 }

@@ -31,6 +31,8 @@ import traceback
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+from state_writer import STATE_DIR as LOG_DIR
+
 import numpy as np
 
 import aiohttp
@@ -94,6 +96,23 @@ class HarnessBot(BotAI):
             dashboard=None,
             lb=None,
         )
+
+    def log(self, message: str):
+        """Log a message from bot code. Shows in dashboard and writes to log/bot.log."""
+        try:
+            game_time = self.time_formatted
+        except Exception:
+            game_time = "--:--"
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.log("bot", message)
+        else:
+            print(f"[bot] [{game_time}] {message}")
+        try:
+            with open(os.path.join(LOG_DIR, "bot.log"), "a") as f:
+                f.write(f"[{game_time}] {message}\n")
+        except Exception:
+            pass
 
     async def on_start(self):
         hs = self._harness_state
