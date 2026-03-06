@@ -1,5 +1,5 @@
 """
-SC2 Bot Harness — hot-reloads bot.py on every game tick.
+SC2 Bot Harness — hot-reloads bot_src/ on every game tick.
 
 Usage:
     python run.py [--map MAP_NAME] [--race RACE] [--difficulty DIFFICULTY]
@@ -13,8 +13,8 @@ Remote mode (bot code here, SC2 on a separate machine — see server.py):
     python run.py --remote-host ws://SERVER:5000/sc2api --race terran
     python run.py --remote-join ws://SERVER:5001/sc2api --host-ip SERVER --race zerg
 
-While the game is running, edit bot.py and save. Your changes take effect
-on the next tick. If bot.py has a syntax error or crashes, the harness
+While the game is running, edit bot_src/ and save. Your changes take effect
+on the next tick. If bot code has a syntax error or crashes, the harness
 logs the error and skips that tick — the game keeps running.
 """
 
@@ -28,6 +28,7 @@ import socket
 import sys
 import time
 import traceback
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import numpy as np
@@ -51,7 +52,7 @@ from ports import DEFAULT_BASE_PORT, make_portconfig
 # Bot code package — hot-reloaded from the bot_src/ directory.
 BOT_PACKAGE = "bot_src"
 BOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), BOT_PACKAGE)
-BOT_ENTRY = f"{BOT_PACKAGE}.bot"  # Must define play(bot, memory)
+BOT_ENTRY = f"{BOT_PACKAGE}.bot"  # Must define a BotAI subclass
 
 RACE_MAP = {r.name.lower(): r for r in Race}
 DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
@@ -59,6 +60,22 @@ GAUNTLET_DIFFICULTIES = [
     Difficulty.VeryEasy, Difficulty.Easy, Difficulty.Medium,
     Difficulty.MediumHard, Difficulty.Hard, Difficulty.Harder, Difficulty.VeryHard,
 ]
+
+
+_HARNESS_METHODS = {
+    'on_step', 'on_start', 'on_end', 'on_reload',
+    'on_unit_destroyed', 'on_unit_took_damage',
+    'on_building_construction_complete', 'on_upgrade_complete',
+    'on_enemy_unit_entered_vision',
+}
+
+
+def _find_bot_class(module):
+    """Find the first BotAI subclass defined in the module."""
+    for name, obj in inspect.getmembers(module, inspect.isclass):
+        if issubclass(obj, BotAI) and obj is not BotAI and obj.__module__ == module.__name__:
+            return obj
+    return None
 
 
 class HarnessBot(BotAI):
@@ -69,52 +86,68 @@ class HarnessBot(BotAI):
 
     def __init__(self):
         super().__init__()
-        self.memory = {}
-        self._bot_module = None
-        self._bot_mtimes = {}
-        self._last_error = None
-        self.dashboard: Dashboard | None = None
-        self._lb = None
+        self._harness_state = SimpleNamespace(
+            bot_module=None,
+            bot_mtimes={},
+            last_error=None,
+            user_class=None,
+            dashboard=None,
+            lb=None,
+        )
 
     async def on_start(self):
+        hs = self._harness_state
         state_writer = StateWriter(
             self,
             map_name=self._map_name,
             opponent_info=self._opponent_info,
         )
         state_writer.start()
-        self.dashboard = Dashboard(
+        hs.dashboard = Dashboard(
             self,
             map_name=self._map_name,
             opponent_info=self._opponent_info,
             state_writer=state_writer,
         )
-        self.dashboard.start()
+        hs.dashboard.start()
 
-        if self._lb:
+        if hs.lb:
             gi = self.game_info
             pa = gi.playable_area
             terrain_b64 = base64.b64encode(
                 np.packbits(gi.pathing_grid.data_numpy).tobytes()
             ).decode("ascii")
-            self._lb.send_minimap_init(
+            hs.lb.send_minimap_init(
                 map_size=[gi.map_size.x, gi.map_size.y],
                 playable=[pa.x, pa.y, pa.width, pa.height],
                 terrain=terrain_b64,
             )
 
+        # Delegate to user class on_start (fires once per game)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_start'):
+            try:
+                result = uc.on_start(self)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=0, game_time=self.time_formatted)
+
     async def on_step(self, iteration: int):
-        dash = self.dashboard
+        hs = self._harness_state
+        dash = hs.dashboard
 
         # Hot-reload bot code if any .py file in bot_src/ changed (or on first load)
         if not os.path.isdir(BOT_DIR):
-            if self._last_error != "missing":
+            if hs.last_error != "missing":
                 msg = f"Bot source directory not found: {BOT_PACKAGE}/"
                 if dash:
                     dash.log("harness", msg)
                 else:
                     print(f"[harness] {msg}")
-                self._last_error = "missing"
+                hs.last_error = "missing"
             return
 
         current_mtimes = {}
@@ -125,21 +158,22 @@ class HarnessBot(BotAI):
                     path = os.path.join(root, f)
                     current_mtimes[path] = os.path.getmtime(path)
 
-        if current_mtimes != self._bot_mtimes:
-            if self._bot_mtimes:
+        code_changed = current_mtimes != hs.bot_mtimes
+        if code_changed:
+            if hs.bot_mtimes:
                 changed = sorted(
                     os.path.relpath(p, BOT_DIR)
                     for p in current_mtimes
-                    if current_mtimes.get(p) != self._bot_mtimes.get(p)
+                    if current_mtimes.get(p) != hs.bot_mtimes.get(p)
                 )
                 changed += sorted(
                     os.path.relpath(p, BOT_DIR)
-                    for p in self._bot_mtimes
+                    for p in hs.bot_mtimes
                     if p not in current_mtimes
                 )
             else:
                 changed = []
-            self._bot_mtimes = current_mtimes
+            hs.bot_mtimes = current_mtimes
             try:
                 # Purge all bot package modules so imports are re-evaluated
                 to_remove = [
@@ -148,8 +182,33 @@ class HarnessBot(BotAI):
                 ]
                 for k in to_remove:
                     del sys.modules[k]
-                self._bot_module = importlib.import_module(BOT_ENTRY)
-                self._last_error = None
+                hs.bot_module = importlib.import_module(BOT_ENTRY)
+
+                # Find the user's BotAI subclass
+                user_class = _find_bot_class(hs.bot_module)
+                if user_class is None:
+                    if hs.last_error != "no_class":
+                        msg = f"No BotAI subclass found in {BOT_ENTRY}"
+                        if dash:
+                            dash.log("harness", msg)
+                        else:
+                            print(f"[harness] {msg}")
+                        hs.last_error = "no_class"
+                    return
+
+                # Synthesize a new class combining HarnessBot + user attributes
+                # Exclude harness-controlled methods — they're called via unbound delegation
+                attrs = {
+                    name: value
+                    for name, value in vars(user_class).items()
+                    if not (name.startswith('__') and name.endswith('__'))
+                    and name not in _HARNESS_METHODS
+                }
+                new_class = type('UserBot', (HarnessBot,), attrs)
+                self.__class__ = new_class
+                hs.user_class = user_class
+
+                hs.last_error = None
                 if changed:
                     changed_str = ", ".join(changed)
                     msg = f"Reloaded bot [{changed_str}] (tick {iteration}, {self.time_formatted})"
@@ -161,8 +220,20 @@ class HarnessBot(BotAI):
                     dash.log("harness", msg)
                 else:
                     print(f"[harness] {msg}")
+
+                # Call on_reload if defined (fires every hot-reload)
+                if hasattr(user_class, 'on_reload'):
+                    try:
+                        result = user_class.on_reload(self)
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception:
+                        tb = traceback.format_exc()
+                        if dash:
+                            dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
+
             except Exception:
-                self._last_error = "load"
+                hs.last_error = "load"
                 tb = traceback.format_exc()
                 if dash:
                     dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
@@ -172,39 +243,30 @@ class HarnessBot(BotAI):
                     traceback.print_exc()
                 return
 
-        if self._bot_module is None:
+        if hs.user_class is None:
             return
 
-        play_fn = getattr(self._bot_module, "play", None)
-        if play_fn is None:
-            if self._last_error != "no_play":
-                msg = f"No play() function found in {BOT_ENTRY}"
+        # Delegate on_step to user class
+        uc = hs.user_class
+        if hasattr(uc, 'on_step'):
+            try:
+                result = uc.on_step(self, iteration)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
                 if dash:
-                    dash.log("harness", msg)
+                    dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
                 else:
-                    print(f"[harness] {msg}")
-                self._last_error = "no_play"
-            return
-
-        try:
-            result = play_fn(self, self.memory)
-            # Support async play() functions
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            tb = traceback.format_exc()
-            if dash:
-                dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
-            else:
-                print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
-                traceback.print_exc()
+                    print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
+                    traceback.print_exc()
 
         # Update dashboard at end of tick
         if dash:
             dash.update(iteration)
 
         # Send minimap data to leaderboard (~every 22 ticks / ~1s)
-        if self._lb:
+        if hs.lb:
             units = []
             for u in self.units:
                 units.append([round(u.position.x, 1), round(u.position.y, 1), 0])
@@ -225,36 +287,101 @@ class HarnessBot(BotAI):
                 vis = np.concatenate([vis, np.zeros(pad, dtype=np.uint8)])
             packed = (vis[0::4] << 6) | (vis[1::4] << 4) | (vis[2::4] << 2) | vis[3::4]
             vis_b64 = base64.b64encode(packed.astype(np.uint8).tobytes()).decode("ascii")
-            self._lb.send_minimap(units=units, visibility=vis_b64)
+            hs.lb.send_minimap(units=units, visibility=vis_b64)
 
     async def on_end(self, game_result: Result):
-        if self.dashboard:
-            self.dashboard.log("harness", f"Game ended: {game_result}")
+        hs = self._harness_state
+        # Delegate to user class on_end before cleanup
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_end'):
+            try:
+                result = uc.on_end(self, game_result)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+        if hs.dashboard:
+            hs.dashboard.log("harness", f"Game ended: {game_result}")
             # Final render so the user sees the end state briefly
-            self.dashboard.update(0)
+            hs.dashboard.update(0)
             time.sleep(1.5)
-            self.dashboard.stop()
+            hs.dashboard.stop()
         print(f"[harness] Game ended: {game_result}")
 
     async def on_unit_destroyed(self, unit_tag: int):
-        if self.dashboard:
-            self.dashboard.on_unit_destroyed(unit_tag)
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.on_unit_destroyed(unit_tag)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_unit_destroyed'):
+            try:
+                result = uc.on_unit_destroyed(self, unit_tag)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=self.state.game_loop, game_time=self.time_formatted)
 
     async def on_unit_took_damage(self, unit, amount_damage_taken: float):
-        if self.dashboard:
-            self.dashboard.on_unit_took_damage(unit, amount_damage_taken)
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.on_unit_took_damage(unit, amount_damage_taken)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_unit_took_damage'):
+            try:
+                result = uc.on_unit_took_damage(self, unit, amount_damage_taken)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=self.state.game_loop, game_time=self.time_formatted)
 
     async def on_building_construction_complete(self, unit):
-        if self.dashboard:
-            self.dashboard.on_building_construction_complete(unit)
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.on_building_construction_complete(unit)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_building_construction_complete'):
+            try:
+                result = uc.on_building_construction_complete(self, unit)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=self.state.game_loop, game_time=self.time_formatted)
 
     async def on_upgrade_complete(self, upgrade):
-        if self.dashboard:
-            self.dashboard.on_upgrade_complete(upgrade)
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.on_upgrade_complete(upgrade)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_upgrade_complete'):
+            try:
+                result = uc.on_upgrade_complete(self, upgrade)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=self.state.game_loop, game_time=self.time_formatted)
 
     async def on_enemy_unit_entered_vision(self, unit):
-        if self.dashboard:
-            self.dashboard.on_enemy_unit_entered_vision(unit)
+        hs = self._harness_state
+        if hs.dashboard:
+            hs.dashboard.on_enemy_unit_entered_vision(unit)
+        uc = hs.user_class
+        if uc and hasattr(uc, 'on_enemy_unit_entered_vision'):
+            try:
+                result = uc.on_enemy_unit_entered_vision(self, unit)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                tb = traceback.format_exc()
+                if hs.dashboard:
+                    hs.dashboard.set_error(tb, tick=self.state.game_loop, game_time=self.time_formatted)
 
 
 def get_lan_ip() -> str:
@@ -474,7 +601,7 @@ def run_gauntlet(args, bot_race):
     prep_time = lb.prep_time if lb else args.prep_time
 
     print(f"[gauntlet] Starting gauntlet: {total} rounds, VeryEasy → VeryHard")
-    print(f"[gauntlet] Edit {BOT_MODULE_PATH} while the game runs. Changes apply next tick.")
+    print(f"[gauntlet] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     if start_round > 0:
         print(f"[gauntlet] Resuming from round {start_round + 1}")
     print()
@@ -490,7 +617,7 @@ def run_gauntlet(args, bot_race):
             harness_bot._opponent_info = f"Gauntlet R{round_num}: {difficulty.name} {enemy_race.name}"
 
             if lb:
-                harness_bot._lb = lb
+                harness_bot._harness_state.lb = lb
                 lb.send_status(
                     round_idx=round_idx,
                     difficulty=difficulty.name,

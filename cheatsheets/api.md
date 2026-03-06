@@ -14,13 +14,25 @@ from sc2.data import Race, Result, Alert
 
 ## Entry point
 
+Define a `BotAI` subclass in `bot_src/bot.py`:
+
 ```python
-async def play(bot, memory):
-    # bot   — BotAI instance, full game state + action methods
-    # memory — dict persisting across hot-reloads and ticks
+from sc2.bot_ai import BotAI
+
+class MyBot(BotAI):
+    async def on_step(self, iteration):
+        ...  # called every tick
+
+    async def on_start(self):
+        ...  # called once at game start
+
+    def on_reload(self):
+        ...  # called on every hot-reload (optional)
 ```
 
-`bot.py` is hot-reloaded every tick. Errors are caught and logged without crashing.
+`self` is the live BotAI instance — use `self.workers`, `self.minerals`, etc.
+Instance variables on `self` persist across reloads. `bot_src/` is hot-reloaded
+every tick. Errors are caught and logged without crashing.
 
 ---
 

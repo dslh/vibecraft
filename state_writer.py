@@ -8,12 +8,10 @@ can read it to understand the live game. Files:
   log/snapshot.txt  — current game state, rewritten every ~2s
   log/events.log    — append-only event stream for the whole game
   log/errors.log    — append-only full tracebacks
-  log/memory.json   — bot memory dict, rewritten every ~2s
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from collections import Counter
@@ -77,13 +75,9 @@ class StateWriter:
         _write(os.path.join(STATE_DIR, "game.txt"), "\n".join(lines) + "\n")
 
     def update(self, iteration: int):
-        """Write snapshot + memory."""
+        """Write snapshot."""
         try:
             self._write_snapshot(iteration)
-        except Exception:
-            pass
-        try:
-            self._write_memory()
         except Exception:
             pass
 
@@ -223,17 +217,6 @@ class StateWriter:
             lines.append("Enemy Structures: (unavailable)")
 
         _write(os.path.join(STATE_DIR, "snapshot.txt"), "\n".join(lines) + "\n")
-
-    def _write_memory(self):
-        bot = self.bot
-        mem = getattr(bot, "memory", None)
-        if mem is None:
-            return
-        try:
-            text = json.dumps(mem, indent=2, default=str)
-        except Exception:
-            text = repr(mem)
-        _write(os.path.join(STATE_DIR, "memory.json"), text + "\n")
 
 
 def _write(path: str, content: str):

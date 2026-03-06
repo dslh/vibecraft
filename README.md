@@ -39,54 +39,94 @@ Melee pack (installed in `Maps/Melee/`):
 `run.py` launches SC2 in realtime mode and runs a `HarnessBot` that, on every game tick:
 
 1. Scans all `.py` files in `bot_src/` for changes (by mtime)
-2. If any file changed, purges all `bot_src` modules from memory and re-imports fresh
-3. Calls your `play(bot, memory)` function from `bot_src/bot.py`
-4. Catches exceptions gracefully — a syntax error or crash skips that tick, the game keeps going
+2. If any file changed, purges all `bot_src` modules from `sys.modules` and re-imports fresh
+3. Finds your `BotAI` subclass, synthesizes a new class combining it with the harness, and swaps `self.__class__`
+4. Calls your `on_step(self, iteration)` method (and any callbacks you define)
+5. Catches exceptions gracefully — a syntax error or crash skips that tick, the game keeps going
 
 This means you can split your bot across as many files as you want inside `bot_src/`. Edit any file and save — all changes take effect together on the next tick.
 
 ## Writing your bot
 
-Your bot code lives in `bot_src/`. The entry point is `bot_src/bot.py`, which must define:
+Your bot code lives in `bot_src/`. The entry point is `bot_src/bot.py`, which must define a `BotAI` subclass:
 
 ```python
-def play(bot, memory):
-    ...
+from sc2.bot_ai import BotAI
+from sc2.ids.unit_typeid import UnitTypeId
+
+class MyBot(BotAI):
+    async def on_step(self, iteration):
+        for worker in self.workers.idle:
+            worker.gather(self.mineral_field.closest_to(worker))
 ```
 
-**`bot`** is a [python-sc2 `BotAI`](https://github.com/BurnySc2/python-sc2) instance. Key attributes:
+`self` is the live [python-sc2 `BotAI`](https://github.com/BurnySc2/python-sc2) instance. Key attributes:
 
 | Category | Attributes |
 |----------|-----------|
-| Your units | `bot.workers`, `bot.units`, `bot.structures`, `bot.townhalls`, `bot.gas_buildings` |
-| Enemy | `bot.enemy_units`, `bot.enemy_structures` |
-| Resources | `bot.minerals`, `bot.vespene`, `bot.supply_used`, `bot.supply_left` |
-| Map | `bot.start_location`, `bot.enemy_start_locations`, `bot.game_info.map_center`, `bot.mineral_field`, `bot.vespene_geyser`, `bot.expansion_locations_list` |
-| Time | `bot.time` (seconds), `bot.time_formatted`, `bot.state.game_loop` |
-| Queries | `bot.already_pending(UnitTypeId.X)`, `bot.can_afford(UnitTypeId.X)` |
+| Your units | `self.workers`, `self.units`, `self.structures`, `self.townhalls`, `self.gas_buildings` |
+| Enemy | `self.enemy_units`, `self.enemy_structures` |
+| Resources | `self.minerals`, `self.vespene`, `self.supply_used`, `self.supply_left` |
+| Map | `self.start_location`, `self.enemy_start_locations`, `self.game_info.map_center`, `self.mineral_field`, `self.vespene_geyser`, `self.expansion_locations_list` |
+| Time | `self.time` (seconds), `self.time_formatted`, `self.state.game_loop` |
+| Queries | `self.already_pending(UnitTypeId.X)`, `self.can_afford(UnitTypeId.X)` |
 
 Commands are issued directly on units:
 
 ```python
-worker.gather(bot.mineral_field.closest_to(worker))
+worker.gather(self.mineral_field.closest_to(worker))
 worker.attack(target)
 unit.move(position)
 townhall.train(UnitTypeId.SCV)
-bot.do(worker.build(UnitTypeId.BARRACKS, position))
+self.do(worker.build(UnitTypeId.BARRACKS, position))
 ```
 
-**`memory`** is a `dict` that persists across hot-reloads. Use it to keep state between ticks even as you edit your code:
+**Instance variables** on `self` persist across hot-reloads. Use them to keep state between ticks:
 
 ```python
-def play(bot, memory):
-    memory.setdefault("rush_sent", False)
-    if bot.supply_army > 10 and not memory["rush_sent"]:
-        for unit in bot.units:
-            unit.attack(bot.enemy_start_locations[0])
-        memory["rush_sent"] = True
+class MyBot(BotAI):
+    async def on_step(self, iteration):
+        if not hasattr(self, 'rush_sent'):
+            self.rush_sent = False
+        if self.supply_army > 10 and not self.rush_sent:
+            for unit in self.units:
+                unit.attack(self.enemy_start_locations[0])
+            self.rush_sent = True
 ```
 
-`play()` can also be `async` if you need python-sc2's async methods (e.g. `find_placement`).
+### Callbacks
+
+All standard python-sc2 callbacks are supported:
+
+```python
+class MyBot(BotAI):
+    async def on_start(self):
+        ...  # once at game start
+
+    async def on_step(self, iteration):
+        ...  # every tick
+
+    async def on_end(self, game_result):
+        ...  # when game ends
+
+    async def on_unit_destroyed(self, unit_tag):
+        ...
+
+    async def on_unit_took_damage(self, unit, amount_damage_taken):
+        ...
+
+    async def on_building_construction_complete(self, unit):
+        ...
+
+    async def on_upgrade_complete(self, upgrade):
+        ...
+
+    async def on_enemy_unit_entered_vision(self, unit):
+        ...
+
+    def on_reload(self):
+        ...  # fires on every hot-reload (optional, harness-specific)
+```
 
 ### Splitting your bot across files
 
@@ -95,7 +135,7 @@ As your bot grows, split logic into separate modules inside `bot_src/`:
 ```
 bot_src/
   __init__.py
-  bot.py          # entry point — defines play()
+  bot.py          # entry point — defines BotAI subclass
   economy.py      # economy management
   army.py         # army control
   strategy.py     # high-level decisions
@@ -107,9 +147,10 @@ Import them in `bot.py` using relative imports:
 from .economy import manage_economy
 from .army import manage_army
 
-def play(bot, memory):
-    manage_economy(bot, memory)
-    manage_army(bot, memory)
+class MyBot(BotAI):
+    async def on_step(self, iteration):
+        manage_economy(self)
+        manage_army(self)
 ```
 
 Saving any file in `bot_src/` triggers a full reload — all modules are re-imported together.
