@@ -1,14 +1,14 @@
 """
 State file writer for SC2 Bot Harness.
 
-Writes game state to bot/state/ so that external tools (like Claude Code)
+Writes game state to bot/log/ so that external tools (like Claude Code)
 can read it to understand the live game. Files:
 
-  state/game.txt      — static game metadata, written once at start
-  state/snapshot.txt  — current game state, rewritten every ~2s
-  state/events.log    — append-only event stream for the whole game
-  state/errors.log    — append-only full tracebacks
-  state/memory.json   — bot memory dict, rewritten every ~2s
+  log/game.txt      — static game metadata, written once at start
+  log/snapshot.txt  — current game state, rewritten every ~2s
+  log/events.log    — append-only event stream for the whole game
+  log/errors.log    — append-only full tracebacks
+  log/memory.json   — bot memory dict, rewritten every ~2s
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from collections import Counter
 
 from sc2.ids.unit_typeid import UnitTypeId
 
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
+STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
 
 # Same exclusion sets as dashboard
 _WORKER_TYPES = {
@@ -52,7 +52,7 @@ class StateWriter:
         self._write_count = 0
 
     def start(self):
-        """Create state/ directory (clean slate) and write game.txt."""
+        """Create log/ directory (clean slate) and write game.txt."""
         if os.path.exists(STATE_DIR):
             shutil.rmtree(STATE_DIR)
         os.makedirs(STATE_DIR)
