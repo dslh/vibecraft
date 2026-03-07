@@ -164,6 +164,29 @@ class MyBot(BotAI):
 
 Saving any file in `bot_src/` triggers a full reload — all modules are re-imported together.
 
+## Sending commands to a running game
+
+Use `cmd.py` to execute one-off Python snippets inside the running game loop. Code runs on the next game tick with `self` (or `bot`) bound to the BotAI instance. Common imports (`UnitTypeId`, `AbilityId`, `UpgradeId`, `Race`, `Point2`) are pre-loaded.
+
+```bash
+# Inspect game state (last expression is auto-printed)
+./cmd.py 'self.minerals'
+./cmd.py 'len(self.workers.idle)'
+
+# Print statements work too
+./cmd.py 'print(f"Supply: {self.supply_used}/{self.supply_cap}")'
+
+# Issue orders
+./cmd.py 'await self.build(UnitTypeId.SUPPLYDEPOT, near=self.townhalls.first.position)'
+./cmd.py 'self.workers.idle.first.attack(self.enemy_start_locations[0])'
+
+# Multi-line via stdin
+echo 'for w in self.workers.idle:
+    w.gather(self.mineral_field.closest_to(w))' | ./cmd.py
+```
+
+stdout, stderr, and errors are captured and returned to the caller. Exit code is 0 on success, 1 on error or timeout (30s). `await` is supported for async methods.
+
 ## Multiplayer
 
 ### LAN mode

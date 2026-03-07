@@ -19,13 +19,17 @@ logs the error and skips that tick — the game keeps running.
 """
 
 import argparse
+import ast
 import asyncio
 import base64
 import importlib
 import inspect
+import io
+import json
 import os
 import socket
 import sys
+import textwrap
 import time
 import traceback
 from types import SimpleNamespace
@@ -55,6 +59,9 @@ from ports import DEFAULT_BASE_PORT, make_portconfig
 BOT_PACKAGE = "bot_src"
 BOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), BOT_PACKAGE)
 BOT_ENTRY = f"{BOT_PACKAGE}.bot"  # Must define a BotAI subclass
+
+# Commands directory — cmd.py drops .py files here for one-shot execution.
+COMMANDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "commands")
 
 RACE_MAP = {r.name.lower(): r for r in Race}
 DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
@@ -96,6 +103,103 @@ class HarnessBot(BotAI):
             dashboard=None,
             lb=None,
         )
+
+    async def _drain_commands(self):
+        """Execute any pending command files dropped by cmd.py."""
+        if not os.path.isdir(COMMANDS_DIR):
+            return
+        try:
+            entries = sorted(f for f in os.listdir(COMMANDS_DIR) if f.endswith(".py"))
+        except OSError:
+            return
+        if not entries:
+            return
+
+        from sc2.ids.unit_typeid import UnitTypeId
+        from sc2.ids.ability_id import AbilityId
+        from sc2.ids.upgrade_id import UpgradeId
+        from sc2.position import Point2
+
+        exec_globals = {
+            "__builtins__": __builtins__,
+            "self": self,
+            "bot": self,
+            "UnitTypeId": UnitTypeId,
+            "AbilityId": AbilityId,
+            "UpgradeId": UpgradeId,
+            "Race": Race,
+            "Point2": Point2,
+        }
+
+        for entry in entries:
+            cmd_path = os.path.join(COMMANDS_DIR, entry)
+            result_path = os.path.join(COMMANDS_DIR, entry.removesuffix(".py") + ".result")
+            try:
+                with open(cmd_path) as f:
+                    code = f.read()
+            except OSError:
+                continue
+
+            # If the last statement is an expression, capture its value
+            try:
+                tree = ast.parse(code)
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    last = tree.body[-1]
+                    lines = code.split("\n")
+                    last_start = last.lineno - 1
+                    lines[last_start] = "__result__ = " + lines[last_start]
+                    code = "\n".join(lines)
+            except SyntaxError:
+                pass  # Let the exec report it
+
+            # Wrap in async function so `await` works in commands
+            indented = textwrap.indent(code, "    ")
+            wrapper = f"async def __cmd__(self):\n    __result__ = None\n{indented}\n    return __result__"
+
+            stdout_capture = io.StringIO()
+            stderr_capture = io.StringIO()
+            result = {"ok": True, "stdout": "", "stderr": "", "error": None}
+
+            try:
+                exec(compile(wrapper, cmd_path, "exec"), exec_globals)
+                old_stdout, old_stderr = sys.stdout, sys.stderr
+                sys.stdout, sys.stderr = stdout_capture, stderr_capture
+                try:
+                    retval = await exec_globals["__cmd__"](self)
+                finally:
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
+
+                result["stdout"] = stdout_capture.getvalue()
+                result["stderr"] = stderr_capture.getvalue()
+                if retval is not None:
+                    result["stdout"] += repr(retval) + "\n"
+            except Exception:
+                sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+                result["ok"] = False
+                result["stdout"] = stdout_capture.getvalue()
+                result["stderr"] = stderr_capture.getvalue()
+                result["error"] = traceback.format_exc()
+
+            try:
+                with open(result_path, "w") as f:
+                    json.dump(result, f)
+            except OSError:
+                pass
+
+            # Log to dashboard
+            dash = self._harness_state.dashboard
+            if dash:
+                preview = code.strip().split("\n")[0][:60]
+                if result["ok"]:
+                    dash.log("cmd", preview)
+                else:
+                    dash.log("cmd", f"FAILED: {preview}")
+
+            # Clean up command file
+            try:
+                os.unlink(cmd_path)
+            except FileNotFoundError:
+                pass
 
     def log(self, message: str):
         """Log a message from bot code. Shows in dashboard and writes to log/bot.log."""
@@ -279,6 +383,9 @@ class HarnessBot(BotAI):
                 else:
                     print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
                     traceback.print_exc()
+
+        # Execute any pending commands from cmd.py
+        await self._drain_commands()
 
         # Update dashboard at end of tick
         if dash:
