@@ -1,5 +1,4 @@
 import ast
-import asyncio
 import base64
 import ctypes
 import importlib
@@ -35,60 +34,59 @@ COMMANDS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 STEP_TIMEOUT = 5.0  # seconds — kill bot on_step if it takes longer than this
 
 
-def _raise_in_thread(thread_id, exc_type):
-    """Raise an exception in another thread (CPython only)."""
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_ulong(thread_id), ctypes.py_object(exc_type),
-    )
-    if res == 0:
-        raise ValueError("Invalid thread ID")
-    if res > 1:
-        # Something went wrong, reset it
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_id), None)
+class _StepTimeoutError(Exception):
+    """Raised in the main thread when on_step takes too long."""
+    pass
 
 
-async def _run_with_timeout(coro, timeout):
-    """Run a coroutine with a hard timeout that can interrupt synchronous loops.
+class _Watchdog:
+    """Background thread that interrupts the main thread if on_step takes too long.
 
-    Uses a worker thread so that even blocking/synchronous code can be
-    interrupted via PyThreadState_SetAsyncExc.
+    Works by injecting a _StepTimeoutError into the main thread via
+    PyThreadState_SetAsyncExc. This can interrupt synchronous infinite loops
+    that never yield to the event loop.
     """
-    loop = asyncio.get_event_loop()
-    result_exc = [None, None]  # [result, exception]
-    thread_id = [None]
 
-    def _worker():
-        thread_id[0] = threading.current_thread().ident
-        inner_loop = asyncio.new_event_loop()
+    def __init__(self, timeout: float):
+        self.timeout = timeout
+        self._main_thread_id = threading.main_thread().ident
+        self._timer: threading.Timer | None = None
+        self._stuck_traceback: str | None = None
+
+    def start(self):
+        self._stuck_traceback = None
+        self._timer = threading.Timer(self.timeout, self._on_timeout)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def cancel(self):
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    @property
+    def traceback(self) -> str | None:
+        return self._stuck_traceback
+
+    def _on_timeout(self):
+        # Capture stack trace from the main thread before interrupting
+        frame = sys._current_frames().get(self._main_thread_id)
+        if frame:
+            self._stuck_traceback = "".join(traceback.format_stack(frame))
+        else:
+            self._stuck_traceback = "(unable to capture stack trace)"
+        # Inject exception into main thread
         try:
-            result_exc[0] = inner_loop.run_until_complete(coro)
-        except BaseException as e:
-            result_exc[1] = e
-        finally:
-            inner_loop.close()
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        # Capture stack trace from the stuck thread before killing it
-        stuck_tb = ""
-        if thread_id[0] is not None:
-            frame = sys._current_frames().get(thread_id[0])
-            if frame:
-                stuck_tb = "".join(traceback.format_stack(frame))
-            try:
-                _raise_in_thread(thread_id[0], SystemExit)
-            except (ValueError, SystemError):
-                pass
-        t.join(1.0)
-        msg = f"on_step exceeded {timeout}s timeout (possible infinite loop)\n\nBot was stuck at:\n{stuck_tb}"
-        raise TimeoutError(msg)
-
-    if result_exc[1] is not None:
-        raise result_exc[1]
-    return result_exc[0]
+            res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(self._main_thread_id),
+                ctypes.py_object(_StepTimeoutError),
+            )
+            if res > 1:
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(self._main_thread_id), None,
+                )
+        except (ValueError, SystemError):
+            pass
 
 
 _HARNESS_METHODS = {
@@ -160,15 +158,21 @@ class HarnessBot(BotAI):
             except OSError:
                 continue
 
-            # If the last statement is an expression, capture its value
+            # If the last statement is an expression, rewrite the AST to
+            # capture its value into __result__. This is more robust than
+            # string manipulation (handles semicolons, multiline exprs, etc.)
             try:
                 tree = ast.parse(code)
                 if tree.body and isinstance(tree.body[-1], ast.Expr):
-                    last = tree.body[-1]
-                    lines = code.split("\n")
-                    last_start = last.lineno - 1
-                    lines[last_start] = "__result__ = " + lines[last_start]
-                    code = "\n".join(lines)
+                    last_expr = tree.body[-1]
+                    assign = ast.Assign(
+                        targets=[ast.Name(id="__result__", ctx=ast.Store())],
+                        value=last_expr.value,
+                    )
+                    ast.copy_location(assign, last_expr)
+                    tree.body[-1] = assign
+                    ast.fix_missing_locations(tree)
+                    code = ast.unparse(tree)
             except SyntaxError:
                 pass  # Let the exec report it
 
@@ -184,11 +188,18 @@ class HarnessBot(BotAI):
                 exec(compile(wrapper, cmd_path, "exec"), exec_globals)
                 old_stdout, old_stderr = sys.stdout, sys.stderr
                 sys.stdout, sys.stderr = stdout_capture, stderr_capture
+                watchdog = _Watchdog(STEP_TIMEOUT)
+                watchdog.start()
                 try:
-                    retval = await _run_with_timeout(
-                        exec_globals["__cmd__"](self), STEP_TIMEOUT,
+                    retval = await exec_globals["__cmd__"](self)
+                except _StepTimeoutError:
+                    stuck_tb = watchdog.traceback or "(no stack trace)"
+                    raise TimeoutError(
+                        f"Command exceeded {STEP_TIMEOUT}s timeout\n"
+                        f"\nStuck at:\n{stuck_tb}"
                     )
                 finally:
+                    watchdog.cancel()
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
                 result["stdout"] = stdout_capture.getvalue()
@@ -391,15 +402,21 @@ class HarnessBot(BotAI):
         if hs.user_class is None:
             return
 
-        # Delegate on_step to user class (with timeout to catch infinite loops)
+        # Delegate on_step to user class (with watchdog to catch infinite loops)
         uc = hs.user_class
         if hasattr(uc, 'on_step'):
+            watchdog = _Watchdog(STEP_TIMEOUT)
+            watchdog.start()
             try:
                 result = uc.on_step(self, iteration)
                 if inspect.isawaitable(result):
-                    await _run_with_timeout(result, STEP_TIMEOUT)
-            except TimeoutError as e:
-                tb = f"TimeoutError: {e}"
+                    await result
+            except _StepTimeoutError:
+                stuck_tb = watchdog.traceback or "(no stack trace)"
+                tb = (
+                    f"on_step exceeded {STEP_TIMEOUT}s timeout (possible infinite loop)\n"
+                    f"\nBot was stuck at:\n{stuck_tb}"
+                )
                 if dash:
                     dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
                     dash.log("error", f"on_step timed out ({STEP_TIMEOUT}s) — possible infinite loop")
@@ -412,6 +429,8 @@ class HarnessBot(BotAI):
                 else:
                     print(f"[harness] Bot error at tick {iteration} ({self.time_formatted}):")
                     traceback.print_exc()
+            finally:
+                watchdog.cancel()
 
         # Execute any pending commands from cmd.py
         await self._drain_commands()

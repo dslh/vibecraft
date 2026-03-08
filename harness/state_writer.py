@@ -18,7 +18,7 @@ from collections import Counter
 
 from sc2.ids.unit_typeid import UnitTypeId
 
-STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "log")
 
 # Same exclusion sets as dashboard
 _WORKER_TYPES = {
