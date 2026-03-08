@@ -1,5 +1,7 @@
 import ast
+import asyncio
 import base64
+import ctypes
 import importlib
 import inspect
 import io
@@ -7,6 +9,7 @@ import json
 import os
 import sys
 import textwrap
+import threading
 import time
 import traceback
 from types import SimpleNamespace
@@ -27,6 +30,65 @@ BOT_ENTRY = f"{BOT_PACKAGE}.bot"  # Must define a BotAI subclass
 
 # Commands directory — cmd.py drops .py files here for one-shot execution.
 COMMANDS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "commands")
+
+
+STEP_TIMEOUT = 5.0  # seconds — kill bot on_step if it takes longer than this
+
+
+def _raise_in_thread(thread_id, exc_type):
+    """Raise an exception in another thread (CPython only)."""
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(thread_id), ctypes.py_object(exc_type),
+    )
+    if res == 0:
+        raise ValueError("Invalid thread ID")
+    if res > 1:
+        # Something went wrong, reset it
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(thread_id), None)
+
+
+async def _run_with_timeout(coro, timeout):
+    """Run a coroutine with a hard timeout that can interrupt synchronous loops.
+
+    Uses a worker thread so that even blocking/synchronous code can be
+    interrupted via PyThreadState_SetAsyncExc.
+    """
+    loop = asyncio.get_event_loop()
+    result_exc = [None, None]  # [result, exception]
+    thread_id = [None]
+
+    def _worker():
+        thread_id[0] = threading.current_thread().ident
+        inner_loop = asyncio.new_event_loop()
+        try:
+            result_exc[0] = inner_loop.run_until_complete(coro)
+        except BaseException as e:
+            result_exc[1] = e
+        finally:
+            inner_loop.close()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout)
+
+    if t.is_alive():
+        # Capture stack trace from the stuck thread before killing it
+        stuck_tb = ""
+        if thread_id[0] is not None:
+            frame = sys._current_frames().get(thread_id[0])
+            if frame:
+                stuck_tb = "".join(traceback.format_stack(frame))
+            try:
+                _raise_in_thread(thread_id[0], SystemExit)
+            except (ValueError, SystemError):
+                pass
+        t.join(1.0)
+        msg = f"on_step exceeded {timeout}s timeout (possible infinite loop)\n\nBot was stuck at:\n{stuck_tb}"
+        raise TimeoutError(msg)
+
+    if result_exc[1] is not None:
+        raise result_exc[1]
+    return result_exc[0]
 
 
 _HARNESS_METHODS = {
@@ -123,7 +185,9 @@ class HarnessBot(BotAI):
                 old_stdout, old_stderr = sys.stdout, sys.stderr
                 sys.stdout, sys.stderr = stdout_capture, stderr_capture
                 try:
-                    retval = await exec_globals["__cmd__"](self)
+                    retval = await _run_with_timeout(
+                        exec_globals["__cmd__"](self), STEP_TIMEOUT,
+                    )
                 finally:
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
@@ -327,13 +391,20 @@ class HarnessBot(BotAI):
         if hs.user_class is None:
             return
 
-        # Delegate on_step to user class
+        # Delegate on_step to user class (with timeout to catch infinite loops)
         uc = hs.user_class
         if hasattr(uc, 'on_step'):
             try:
                 result = uc.on_step(self, iteration)
                 if inspect.isawaitable(result):
-                    await result
+                    await _run_with_timeout(result, STEP_TIMEOUT)
+            except TimeoutError as e:
+                tb = f"TimeoutError: {e}"
+                if dash:
+                    dash.set_error(tb, tick=iteration, game_time=self.time_formatted)
+                    dash.log("error", f"on_step timed out ({STEP_TIMEOUT}s) — possible infinite loop")
+                else:
+                    print(f"[harness] {tb}")
             except Exception:
                 tb = traceback.format_exc()
                 if dash:
