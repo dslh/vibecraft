@@ -12,17 +12,7 @@ C:\Program Files (x86)\StarCraft II
 
 If you install it elsewhere, set the `SC2PATH` environment variable to the install directory.
 
-### 2. Maps
-
-The bot defaults to `Simple64` but can use any melee map. Download the **Melee** map pack from Blizzard's [map repository](https://github.com/Blizzard/s2client-proto#map-packs) and extract the `.SC2Map` files into:
-
-```
-C:\Program Files (x86)\StarCraft II\Maps\
-```
-
-Maps can be in subdirectories (e.g. `Maps\Melee\Simple64.SC2Map`) — the bot searches one level deep.
-
-### 3. Python 3.10+
+### 2. Python 3.10+
 
 Install Python **3.10 or newer** from [python.org](https://www.python.org/downloads/). During installation, check **"Add Python to PATH"**.
 
@@ -32,11 +22,11 @@ Verify it works:
 python --version
 ```
 
-### 4. Git
+### 3. Git
 
 Install Git from [git-scm.com](https://git-scm.com/downloads/win). The defaults are fine.
 
-### 5. Terminal
+### 4. Terminal
 
 You need a terminal that supports ANSI colors and isn't painful to use. Pick one:
 
@@ -47,11 +37,39 @@ Avoid plain `cmd.exe` — it works but the experience is poor.
 
 ## Project Setup
 
+Open your terminal and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/dslh/vibecraft/main/setup.ps1 -OutFile setup.ps1; .\setup.ps1; Remove-Item setup.ps1"
+```
+
+This will:
+
+- Clone the project repos into `%USERPROFILE%\vibecraft\`
+- Create a Python virtual environment and install all dependencies
+- Download and install map packs (Blizzard Melee + AI Arena competitive maps)
+- Verify that everything works
+
+The script is safe to re-run — it will update existing repos and skip steps that are already done.
+
+### Verify it works
+
+```bash
+cd %USERPROFILE%\vibecraft\bot
+.venv\Scripts\python run.py --map Simple64 --race terran --difficulty medium
+```
+
+SC2 should launch, connect, and start a game. The bot hot-reloads code from `bot_src/` on every tick — edit and save files to update behavior mid-game.
+
+<details>
+<summary>Manual setup (if you prefer not to use the script)</summary>
+
 ### Clone the repos
 
 ```bash
-mkdir sc2
-cd sc2
+cd %USERPROFILE%
+mkdir vibecraft
+cd vibecraft
 git clone https://github.com/dslh/vibecraft.git bot
 git clone https://github.com/dslh/python-sc2.git
 ```
@@ -65,15 +83,14 @@ python -m venv .venv
 .venv\Scripts\pip install claude-agent-sdk mcp rich prompt_toolkit
 ```
 
-This installs `python-sc2` in editable mode along with all its dependencies (aiohttp, protobuf, numpy, scipy, etc.), plus the chat interface dependencies.
+### Install maps
 
-### Verify it works
+Download map packs and extract the `.SC2Map` files into `StarCraft II\Maps\`:
 
-```bash
-.venv\Scripts\python run.py --map Simple64 --race terran --difficulty medium
-```
+- [Melee (Blizzard)](https://blzdistsc2-a.akamaihd.net/MapPacks/Melee.zip) — includes Simple64, Flat48, etc.
+- [AI Arena maps](https://aiarena.net/wiki/maps/) — competitive ladder maps
 
-SC2 should launch, connect, and start a game. The bot hot-reloads code from `bot_src/` on every tick — edit and save files to update behavior mid-game.
+</details>
 
 ## AI-Assisted Development
 
@@ -93,3 +110,4 @@ On first run it will prompt for an [Anthropic API key](https://console.anthropic
 - **SC2 doesn't launch** — Check that `SC2_x64.exe` exists in `StarCraft II\Versions\BaseXXXXX\`. If you have multiple `Base*` folders, the bot uses the latest one.
 - **"SC2 installation not found"** — Set `SC2PATH=C:\Program Files (x86)\StarCraft II` as an environment variable.
 - **Python import errors** — Make sure you installed python-sc2 into the bot's venv, not your system Python. Use `.venv\Scripts\python`, not just `python`.
+- **Setup script fails** — You can re-run it safely. If a specific step fails, check the colored error message and fix the prerequisite, then run again.

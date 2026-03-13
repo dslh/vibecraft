@@ -12,17 +12,7 @@ C:\Program Files (x86)\StarCraft II
 
 Si vous l'installez ailleurs, définissez la variable d'environnement `SC2PATH` vers le répertoire d'installation.
 
-### 2. Cartes
-
-Le bot utilise `Simple64` par défaut, mais fonctionne avec n'importe quelle carte melee. Téléchargez le pack de cartes **Melee** depuis le [dépôt de cartes de Blizzard](https://github.com/Blizzard/s2client-proto#map-packs) et extrayez les fichiers `.SC2Map` dans :
-
-```
-C:\Program Files (x86)\StarCraft II\Maps\
-```
-
-Les cartes peuvent être dans des sous-dossiers (par ex. `Maps\Melee\Simple64.SC2Map`) — le bot cherche sur un niveau de profondeur.
-
-### 3. Python 3.10+
+### 2. Python 3.10+
 
 Installez Python **3.10 ou plus récent** depuis [python.org](https://www.python.org/downloads/). Pendant l'installation, cochez **« Add Python to PATH »**.
 
@@ -32,11 +22,11 @@ Vérifiez que ça fonctionne :
 python --version
 ```
 
-### 4. Git
+### 3. Git
 
 Installez Git depuis [git-scm.com](https://git-scm.com/downloads/win). Les options par défaut conviennent.
 
-### 5. Terminal
+### 4. Terminal
 
 Il vous faut un terminal qui supporte les couleurs ANSI et qui soit agréable à utiliser. Au choix :
 
@@ -47,11 +37,39 @@ Il vous faut un terminal qui supporte les couleurs ANSI et qui soit agréable à
 
 ## Installation du projet
 
+Ouvrez votre terminal et lancez :
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "iwr https://raw.githubusercontent.com/dslh/vibecraft/main/setup.ps1 -OutFile setup.ps1; .\setup.ps1; Remove-Item setup.ps1"
+```
+
+Le script va :
+
+- Cloner les dépôts du projet dans `%USERPROFILE%\vibecraft\`
+- Créer un environnement virtuel Python et installer toutes les dépendances
+- Télécharger et installer les packs de cartes (Melee de Blizzard + cartes compétitives AI Arena)
+- Vérifier que tout fonctionne
+
+Le script peut être relancé sans risque — il met à jour les dépôts existants et saute les étapes déjà faites.
+
+### Vérifier que tout fonctionne
+
+```bash
+cd %USERPROFILE%\vibecraft\bot
+.venv\Scripts\python run.py --map Simple64 --race terran --difficulty medium
+```
+
+SC2 devrait se lancer, se connecter et démarrer une partie. Le bot recharge automatiquement le code de `bot_src/` à chaque tick — modifiez et sauvegardez vos fichiers pour mettre à jour le comportement en cours de partie.
+
+<details>
+<summary>Installation manuelle (si vous préférez ne pas utiliser le script)</summary>
+
 ### Cloner les dépôts
 
 ```bash
-mkdir sc2
-cd sc2
+cd %USERPROFILE%
+mkdir vibecraft
+cd vibecraft
 git clone https://github.com/dslh/vibecraft.git bot
 git clone https://github.com/dslh/python-sc2.git
 ```
@@ -65,15 +83,14 @@ python -m venv .venv
 .venv\Scripts\pip install claude-agent-sdk mcp rich prompt_toolkit
 ```
 
-Ceci installe `python-sc2` en mode éditable avec toutes ses dépendances (aiohttp, protobuf, numpy, scipy, etc.), ainsi que les dépendances de l'interface chat.
+### Installer les cartes
 
-### Vérifier que tout fonctionne
+Téléchargez les packs de cartes et extrayez les fichiers `.SC2Map` dans `StarCraft II\Maps\` :
 
-```bash
-.venv\Scripts\python run.py --map Simple64 --race terran --difficulty medium
-```
+- [Melee (Blizzard)](https://blzdistsc2-a.akamaihd.net/MapPacks/Melee.zip) — inclut Simple64, Flat48, etc.
+- [Cartes AI Arena](https://aiarena.net/wiki/maps/) — cartes compétitives du ladder
 
-SC2 devrait se lancer, se connecter et démarrer une partie. Le bot recharge automatiquement le code de `bot_src/` à chaque tick — modifiez et sauvegardez vos fichiers pour mettre à jour le comportement en cours de partie.
+</details>
 
 ## Développement assisté par IA
 
@@ -93,3 +110,4 @@ Au premier lancement, il vous demandera une [clé API Anthropic](https://console
 - **SC2 ne se lance pas** — Vérifiez que `SC2_x64.exe` existe dans `StarCraft II\Versions\BaseXXXXX\`. Si vous avez plusieurs dossiers `Base*`, le bot utilise le plus récent.
 - **« SC2 installation not found »** — Définissez la variable d'environnement `SC2PATH=C:\Program Files (x86)\StarCraft II`.
 - **Erreurs d'import Python** — Assurez-vous d'avoir installé python-sc2 dans le venv du bot, pas dans votre Python système. Utilisez `.venv\Scripts\python` et non simplement `python`.
+- **Le script d'installation échoue** — Vous pouvez le relancer sans risque. Si une étape échoue, consultez le message d'erreur en couleur, corrigez le prérequis, puis relancez.
