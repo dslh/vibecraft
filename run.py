@@ -9,10 +9,6 @@ Usage:
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
 
-Remote mode (bot code here, SC2 on a separate machine — see server.py):
-    python run.py --remote-host ws://SERVER:5000/sc2api --race terran
-    python run.py --remote-join ws://SERVER:5001/sc2api --host-ip SERVER --race zerg
-
 While the game is running, edit bot_src/ and save. Your changes take effect
 on the next tick. If bot code has a syntax error or crashes, the harness
 logs the error and skips that tick — the game keeps running.
@@ -21,7 +17,6 @@ logs the error and skips that tick — the game keeps running.
 import argparse
 import asyncio
 import sys
-from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -32,10 +27,7 @@ from sc2.player import Bot, Computer, Human
 
 from harness.bot import BOT_PACKAGE, HarnessBot
 from harness.gauntlet import prep_countdown, run_gauntlet
-from harness.lan import (
-    get_lan_ip, host_lan_game, join_lan_game,
-    remote_host_game, remote_join_game,
-)
+from harness.lan import get_lan_ip, host_lan_game, join_lan_game
 from harness.ports import DEFAULT_BASE_PORT
 
 RACE_MAP = {r.name.lower(): r for r in Race}
@@ -112,24 +104,6 @@ def main():
         help="Override auto-detected LAN IP (use 127.0.0.1 for local testing)",
     )
     parser.add_argument(
-        "--remote-host",
-        default=None,
-        metavar="WS_URL",
-        help="Connect to a remote SC2 instance and host a game (e.g. ws://192.168.1.50:5000/sc2api)",
-    )
-    parser.add_argument(
-        "--remote-join",
-        default=None,
-        metavar="WS_URL",
-        help="Connect to a remote SC2 instance and join an existing game (e.g. ws://192.168.1.50:5001/sc2api)",
-    )
-    parser.add_argument(
-        "--host-ip",
-        default=None,
-        help="IP of the SC2 instance that created the game (for P2P between SC2 instances). "
-             "Auto-derived from WS URL for --remote-host; required for --remote-join.",
-    )
-    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging from python-sc2 and SC2 process",
@@ -159,24 +133,6 @@ def main():
         parser.error("--gauntlet cannot be used with --human")
     if args.leaderboard and not args.gauntlet:
         parser.error("--leaderboard requires --gauntlet")
-
-    if args.remote_host:
-        host_ip = args.host_ip
-        if not host_ip:
-            host_ip = urlparse(args.remote_host).hostname
-            print(f"[harness] --host-ip not specified, using {host_ip} from WebSocket URL")
-        asyncio.run(remote_host_game(
-            args.remote_host, args.map, bot_race, args.base_port, args.players, host_ip,
-        ))
-        return
-
-    if args.remote_join:
-        if not args.host_ip:
-            parser.error("--host-ip is required with --remote-join (IP of the SC2 that created the game)")
-        asyncio.run(remote_join_game(
-            args.remote_join, bot_race, args.base_port, args.players, args.host_ip,
-        ))
-        return
 
     if args.host:
         asyncio.run(host_lan_game(args.map, bot_race, args.base_port, args.players, lan_ip=args.lan_ip))
