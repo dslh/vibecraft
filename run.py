@@ -65,9 +65,10 @@ def main():
     parser.add_argument(
         "--prep-time",
         type=int,
-        default=0,
+        default=None,
         metavar="SECONDS",
-        help="Countdown before each game starts (computer games only)",
+        help="Countdown before each game starts (computer games only). "
+             "Omit for interactive 'press enter' prompt between matches.",
     )
     parser.add_argument(
         "--leaderboard",
@@ -166,8 +167,12 @@ def main():
     print(f"[harness] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     print()
 
-    if args.prep_time > 0 and not args.human:
-        prep_countdown(args.prep_time, f"{args.map}: {difficulty.name} {enemy_race.name}")
+    if not args.human:
+        label = f"{args.map}: {difficulty.name} {enemy_race.name}"
+        if args.prep_time is not None and args.prep_time > 0:
+            prep_countdown(args.prep_time, label)
+        elif args.prep_time is None:
+            input(f"  {label} — Press enter to start.")
 
     run_game(
         maps.get(args.map),

@@ -84,9 +84,11 @@ def run_gauntlet(args, bot_race):
                     elapsed=winning_time,
                 )
 
-            if prep_time > 0:
-                label = f"Round {round_num}/{total}: {difficulty.name} {enemy_race.name}"
+            label = f"Round {round_num}/{total}: {difficulty.name} {enemy_race.name}"
+            if prep_time is not None and prep_time > 0:
                 prep_countdown(prep_time, label)
+            elif prep_time is None:
+                input(f"  {label} — Press enter to start.")
 
             print(f"[gauntlet] Round {round_num}/{total}: "
                   f"Bot ({bot_race.name}) vs {difficulty.name} {enemy_race.name} on {args.map}")

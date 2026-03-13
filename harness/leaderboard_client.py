@@ -40,8 +40,8 @@ class LeaderboardClient:
         self._session: aiohttp.ClientSession | None = None
         self._connected = False
 
-        # Set by server on go/reconnect
-        self.prep_time: int = 0
+        # Set by server on go/reconnect (None = press-enter prompt)
+        self.prep_time: int | None = None
         self.resume_round: int | None = None
         self.elapsed_before: float = 0.0
 
@@ -105,7 +105,7 @@ class LeaderboardClient:
                         print(f"[leaderboard] Waiting for operator to start...")
 
                     elif msg_type == "go":
-                        self.prep_time = data.get("prep_time", 0)
+                        self.prep_time = data.get("prep_time")
                         print(f"[leaderboard] GO!")
                         self._go_event.set()
 
