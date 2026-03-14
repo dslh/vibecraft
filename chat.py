@@ -14,11 +14,15 @@ import argparse
 import asyncio
 import json
 import os
-import select
 import sys
-import termios
 import threading
-import tty
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import select
+    import termios
+    import tty
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -97,10 +101,9 @@ You have SC2-specific tools available via the `sc2` MCP server:
 
 # ── Keystroke watcher ────────────────────────────────────────────────────────
 
-class _KeyWatcher:
-    """Watches stdin for keystrokes in cbreak mode via a background thread.
+class _KeyWatcherBase:
+    """Watches stdin for keystrokes via a background thread.
 
-    While active, stdin is in cbreak mode (character-at-a-time, no echo).
     Keys are pushed into an asyncio queue for the event loop to consume.
     Call stop() to restore the terminal before using prompt_toolkit.
     """
@@ -108,36 +111,70 @@ class _KeyWatcher:
     def __init__(self):
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._active = False
-        self._fd = sys.stdin.fileno()
-        self._old_settings = None
         self._thread: threading.Thread | None = None
 
     def start(self, loop: asyncio.AbstractEventLoop):
-        self._old_settings = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
         self._active = True
         self._thread = threading.Thread(target=self._run, args=(loop,), daemon=True)
         self._thread.start()
 
     def stop(self):
         self._active = False
-        if self._old_settings is not None:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
-            self._old_settings = None
         if self._thread is not None:
             self._thread.join(timeout=0.5)
             self._thread = None
 
     def _run(self, loop: asyncio.AbstractEventLoop):
-        while self._active:
-            r, _, _ = select.select([self._fd], [], [], 0.1)
-            if r and self._active:
-                # Read all immediately available bytes (handles escape sequences)
-                data = os.read(self._fd, 32)
-                loop.call_soon_threadsafe(self._queue.put_nowait, data)
+        raise NotImplementedError
 
     async def wait_key(self) -> bytes:
         return await self._queue.get()
+
+
+if sys.platform == "win32":
+
+    class _KeyWatcher(_KeyWatcherBase):
+        """Windows implementation using msvcrt."""
+
+        def _run(self, loop: asyncio.AbstractEventLoop):
+            import time
+            while self._active:
+                if msvcrt.kbhit():
+                    data = msvcrt.getch()
+                    # Read any immediately following bytes (escape sequences)
+                    while msvcrt.kbhit():
+                        data += msvcrt.getch()
+                    loop.call_soon_threadsafe(self._queue.put_nowait, data)
+                else:
+                    time.sleep(0.05)
+
+else:
+
+    class _KeyWatcher(_KeyWatcherBase):
+        """Unix implementation using termios/cbreak mode."""
+
+        def __init__(self):
+            super().__init__()
+            self._fd = sys.stdin.fileno()
+            self._old_settings = None
+
+        def start(self, loop: asyncio.AbstractEventLoop):
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+            super().start(loop)
+
+        def stop(self):
+            super().stop()
+            if self._old_settings is not None:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+                self._old_settings = None
+
+        def _run(self, loop: asyncio.AbstractEventLoop):
+            while self._active:
+                r, _, _ = select.select([self._fd], [], [], 0.1)
+                if r and self._active:
+                    data = os.read(self._fd, 32)
+                    loop.call_soon_threadsafe(self._queue.put_nowait, data)
 
 
 # ── Tool call summaries ──────────────────────────────────────────────────────
@@ -400,7 +437,11 @@ async def main(verbose: bool = False):
         disallowed_tools=["Bash"],
         mcp_servers={
             "sc2": {
-                "command": os.path.join(BOT_DIR, ".venv", "bin", "python3"),
+                "command": os.path.join(
+                    BOT_DIR, ".venv",
+                    "Scripts" if sys.platform == "win32" else "bin",
+                    "python.exe" if sys.platform == "win32" else "python3",
+                ),
                 "args": [os.path.join(BOT_DIR, "sc2_mcp.py")],
             }
         },

@@ -35,6 +35,9 @@ DIFFICULTY_MAP = {d.name.lower(): d for d in Difficulty}
 
 
 def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="SC2 Bot Harness with hot-reload")
     parser.add_argument("--map", default="Simple64", help="Map name (default: Simple64)")
     parser.add_argument("--race", default="terran", choices=list(RACE_MAP.keys()), help="Bot race")
