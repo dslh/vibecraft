@@ -415,6 +415,7 @@ class Dashboard:
             if not items:
                 lines.append("(idle)", style="dim")
             else:
+                items.sort(key=lambda x: x[0])
                 for name, progress in items[:6]:
                     pct = int(progress * 100)
                     filled = int(progress * 4)
@@ -505,7 +506,7 @@ class Dashboard:
             if not counts:
                 lines.append("(none visible)", style="dim")
             else:
-                for type_id, count in counts.most_common(10):
+                for type_id, count in sorted(counts.most_common(10), key=lambda x: (-x[1], x[0].name)):
                     lines.append(f"{_name(type_id):<18} {count:>3}\n")
         except Exception:
             lines.append("(loading...)")
@@ -521,7 +522,7 @@ class Dashboard:
             if not counts:
                 lines.append("(none visible)", style="dim")
             else:
-                for type_id, count in counts.most_common(8):
+                for type_id, count in sorted(counts.most_common(8), key=lambda x: (-x[1], x[0].name)):
                     lines.append(f"{_name(type_id):<18} {count:>3}\n")
         except Exception:
             lines.append("(loading...)")
