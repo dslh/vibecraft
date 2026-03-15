@@ -17,25 +17,30 @@ Frame format: [port_id:1] [length:2 big-endian] [payload]
 
 import asyncio
 
+_TAG = "[tunnel]"
+
 
 class _UdpRelay(asyncio.DatagramProtocol):
     """Bound on a remote port to intercept local SC2 traffic.
     Also delivers incoming tunnel data to the local SC2 port."""
 
-    def __init__(self, tunnel, send_id, deliver_addr):
+    def __init__(self, tunnel, send_id, deliver_addr, bind_port):
         self.tunnel = tunnel
         self.send_id = send_id
         self.deliver_addr = deliver_addr
+        self.bind_port = bind_port
         self.transport = None
 
     def connection_made(self, transport):
         self.transport = transport
 
     def datagram_received(self, data, addr):
+        print(f"{_TAG} UDP recv {len(data)}b on :{self.bind_port} → tunnel (id={self.send_id})")
         asyncio.create_task(self.tunnel._send(self.send_id, data))
 
     def deliver(self, data):
         if self.transport:
+            print(f"{_TAG} UDP deliver {len(data)}b → :{self.deliver_addr[1]}")
             self.transport.sendto(data, self.deliver_addr)
 
 
@@ -82,28 +87,23 @@ class Tunnel:
                 return t
             except OSError:
                 if i == 0:
-                    print("[tunnel] Waiting for host...")
+                    print(f"{_TAG} Waiting for host...")
                 await asyncio.sleep(1)
         raise ConnectionError(f"Could not connect to {host_ip}:{base_port}")
 
     async def start_relays(self):
-        """Start all port relays and the tunnel reader.
-
-        For ports owned by the LOCAL SC2 (host owns server ports, joiner owns
-        client ports), a TCP deliverer connects to the local SC2 port and
-        bridges it to the tunnel.
-
-        For REMOTE ports, an interceptor listens/binds locally so the local
-        SC2 can connect to it, and bridges traffic through the tunnel.
-        """
+        """Start all port relays and the tunnel reader."""
         bp = self.base_port
+        side = "host" if self.is_host else "joiner"
         if self.is_host:
+            print(f"{_TAG} Host relays: intercept :{bp+3}(udp) :{bp+4}(tcp), deliver :{bp+1}(udp) :{bp+2}(tcp)")
             await self._udp_relay(bind=bp + 3, deliver=bp + 1, send_id=2, recv_id=0)
             await self._tcp_interceptor(port_id=3, port_num=bp + 4)
             self._tasks.append(
                 asyncio.create_task(self._tcp_deliverer(port_id=1, port_num=bp + 2))
             )
         else:
+            print(f"{_TAG} Joiner relays: intercept :{bp+1}(udp) :{bp+2}(tcp), deliver :{bp+3}(udp) :{bp+4}(tcp)")
             await self._udp_relay(bind=bp + 1, deliver=bp + 3, send_id=0, recv_id=2)
             await self._tcp_interceptor(port_id=1, port_num=bp + 2)
             self._tasks.append(
@@ -129,25 +129,29 @@ class Tunnel:
                 if handler:
                     handler(data)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
-            pass
+            print(f"{_TAG} Tunnel connection closed")
 
     async def _udp_relay(self, bind, deliver, send_id, recv_id):
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
-            lambda: _UdpRelay(self, send_id, ("127.0.0.1", deliver)),
+            lambda: _UdpRelay(self, send_id, ("127.0.0.1", deliver), bind),
             local_addr=("127.0.0.1", bind),
         )
         self._transports.append(transport)
         self._handlers[recv_id] = protocol.deliver
+        print(f"{_TAG} UDP relay bound :{bind}")
 
     async def _tcp_interceptor(self, port_id, port_num):
         queue = asyncio.Queue()
         self._handlers[port_id] = queue.put_nowait
 
         async def on_connect(reader, writer):
+            print(f"{_TAG} TCP interceptor :{port_num} — SC2 connected (id={port_id})")
+
             async def local_to_tunnel():
                 try:
                     while data := await reader.read(65535):
+                        print(f"{_TAG} TCP :{port_num} → tunnel {len(data)}b (id={port_id})")
                         await self._send(port_id, data)
                 except (ConnectionError, OSError):
                     pass
@@ -155,7 +159,9 @@ class Tunnel:
             async def tunnel_to_local():
                 try:
                     while True:
-                        writer.write(await queue.get())
+                        data = await queue.get()
+                        print(f"{_TAG} TCP tunnel → :{port_num} {len(data)}b (id={port_id})")
+                        writer.write(data)
                         await writer.drain()
                 except (ConnectionError, OSError):
                     pass
@@ -165,6 +171,7 @@ class Tunnel:
 
         server = await asyncio.start_server(on_connect, "127.0.0.1", port_num)
         self._servers.append(server)
+        print(f"{_TAG} TCP interceptor listening :{port_num}")
 
     async def _tcp_deliverer(self, port_id, port_num):
         queue = asyncio.Queue()
@@ -172,22 +179,29 @@ class Tunnel:
 
         # Retry until SC2 binds the port (happens during join_game)
         reader = writer = None
-        for _ in range(120):
+        for attempt in range(120):
             try:
                 reader, writer = await asyncio.open_connection(
                     "127.0.0.1", port_num
                 )
                 break
             except OSError:
+                if attempt % 10 == 0:
+                    print(f"{_TAG} TCP deliverer waiting for SC2 to bind :{port_num}...")
                 await asyncio.sleep(0.5)
         if reader is None:
-            print(f"[tunnel] Timed out connecting to local port {port_num}")
+            print(f"{_TAG} TCP deliverer TIMED OUT — SC2 never bound :{port_num}")
+            print(f"{_TAG} SC2 may not use game ports with host_ip=127.0.0.1")
             return
+
+        print(f"{_TAG} TCP deliverer connected to :{port_num} (id={port_id})")
 
         async def tunnel_to_local():
             try:
                 while True:
-                    writer.write(await queue.get())
+                    data = await queue.get()
+                    print(f"{_TAG} TCP tunnel → :{port_num} {len(data)}b (id={port_id})")
+                    writer.write(data)
                     await writer.drain()
             except (ConnectionError, OSError):
                 pass
@@ -196,6 +210,7 @@ class Tunnel:
 
         try:
             while data := await reader.read(65535):
+                print(f"{_TAG} TCP :{port_num} → tunnel {len(data)}b (id={port_id})")
                 await self._send(port_id, data)
         except (ConnectionError, OSError):
             pass

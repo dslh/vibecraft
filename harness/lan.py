@@ -1,3 +1,4 @@
+import os
 import socket
 
 from sc2 import maps
@@ -42,6 +43,10 @@ async def _run_lan_game(client, player_id):
 
 
 async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int, lan_ip: str | None = None):
+    # SC2 must listen on all interfaces, not just loopback — otherwise it
+    # may skip game port networking entirely.
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
     if lan_ip is None:
         lan_ip = get_lan_ip()
 
@@ -86,6 +91,8 @@ async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: 
 
 
 async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: int):
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
     # Game ports must match what the host uses
     portconfig = make_portconfig(base_port + 1, num_players)
 
