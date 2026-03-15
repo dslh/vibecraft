@@ -1,4 +1,3 @@
-import os
 import socket
 
 from sc2 import maps
@@ -10,6 +9,7 @@ from sc2.sc2process import SC2Process
 
 from .bot import BOT_PACKAGE, HarnessBot
 from .ports import DEFAULT_BASE_PORT, make_portconfig
+from .tunnel import Tunnel
 
 
 def get_lan_ip() -> str:
@@ -42,54 +42,66 @@ async def _run_lan_game(client, player_id):
 
 
 async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int, lan_ip: str | None = None):
-    os.environ["SC2SERVERHOST"] = "0.0.0.0"
-
-    portconfig = make_portconfig(base_port, num_players)
     if lan_ip is None:
         lan_ip = get_lan_ip()
 
+    # Game ports start after the tunnel port (base_port)
+    portconfig = make_portconfig(base_port + 1, num_players)
+
     print(f"[harness] Hosting LAN game on {map_name}...")
+    tunnel = await Tunnel.listen(base_port)
 
-    async with SC2Process() as controller:
-        players = [Human(Race.Random) for _ in range(num_players)]
-        result = await controller.create_game(maps.get(map_name), players, realtime=True)
+    print(f"[harness] Other player should run:")
+    print(f"[harness]   python run.py --join {lan_ip} --race <race>")
+    if base_port != DEFAULT_BASE_PORT:
+        print(f"[harness]   (add --base-port {base_port})")
+    print(f"[harness] Waiting for opponent to connect...")
 
-        if result.create_game.HasField("error"):
-            err = result.create_game.error
-            details = result.create_game.error_details if result.create_game.HasField("error_details") else ""
-            print(f"[harness] Failed to create game: {err} {details}")
-            return
+    await tunnel.wait_for_peer()
+    print(f"[harness] Opponent connected!")
 
-        print(f"[harness] Game created ({num_players} player slots)")
-        print(f"[harness] Other player should run:")
-        print(f"[harness]   python run.py --join {lan_ip} --race <race>")
-        if base_port != DEFAULT_BASE_PORT:
-            print(f"[harness]   (add --base-port {base_port})")
-        print(f"[harness] Waiting for opponent to join...")
+    try:
+        async with SC2Process() as sc2:
+            players = [Human(Race.Random) for _ in range(num_players)]
+            result = await sc2.create_game(maps.get(map_name), players, realtime=True)
 
-        client = Client(controller._ws)
-        player_id = await client.join_game(
-            race=race,
-            portconfig=portconfig,
-            host_ip=lan_ip,
-        )
+            if result.create_game.HasField("error"):
+                err = result.create_game.error
+                details = result.create_game.error_details if result.create_game.HasField("error_details") else ""
+                print(f"[harness] Failed to create game: {err} {details}")
+                return
 
-        await _run_lan_game(client, player_id)
+            print(f"[harness] Game created. Starting...")
+
+            await tunnel.start_relays()
+
+            client = Client(sc2._ws)
+            player_id = await client.join_game(
+                race=race, portconfig=portconfig, host_ip="127.0.0.1"
+            )
+
+            await _run_lan_game(client, player_id)
+    finally:
+        await tunnel.stop()
 
 
 async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: int):
-    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+    # Game ports must match what the host uses
+    portconfig = make_portconfig(base_port + 1, num_players)
 
-    portconfig = make_portconfig(base_port, num_players)
+    print(f"[harness] Connecting to {host_ip}:{base_port}...")
+    tunnel = await Tunnel.connect(host_ip, base_port)
+    print(f"[harness] Connected!")
 
-    print(f"[harness] Joining LAN game at {host_ip}...")
+    try:
+        async with SC2Process() as sc2:
+            await tunnel.start_relays()
 
-    async with SC2Process() as controller:
-        client = Client(controller._ws)
-        player_id = await client.join_game(
-            race=race,
-            portconfig=portconfig,
-            host_ip=host_ip,
-        )
+            client = Client(sc2._ws)
+            player_id = await client.join_game(
+                race=race, portconfig=portconfig, host_ip="127.0.0.1"
+            )
 
-        await _run_lan_game(client, player_id)
+            await _run_lan_game(client, player_id)
+    finally:
+        await tunnel.stop()
