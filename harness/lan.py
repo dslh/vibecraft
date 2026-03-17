@@ -71,8 +71,26 @@ async def _join_game_checked(client, race, portconfig):
     jr = result.join_game
 
     if jr.HasField("error"):
+        _JOIN_ERRORS = {
+            1: "MissingParticipation — no race or observer id specified",
+            2: "InvalidObservedPlayerId",
+            3: "MissingOptions — interface options not set",
+            4: "MissingPorts — server_ports/client_ports not set",
+            5: "GameFull — all player slots are taken",
+            6: "LaunchError — SC2 failed to launch the game",
+            7: "FeatureUnsupported — multiplayer not supported in this SC2 build",
+            8: "NoSpaceForUser",
+            9: "MapDoesNotExist — map file not found on this machine",
+            10: "CannotOpenMap — map file exists but could not be loaded",
+            11: "ChecksumError — SC2 version or map mismatch between players",
+            12: "NetworkError — game port communication failed",
+            13: "OtherError",
+        }
+        msg = _JOIN_ERRORS.get(jr.error, f"unknown error {jr.error}")
         details = jr.error_details if jr.HasField("error_details") else ""
-        raise RuntimeError(f"join_game failed: error={jr.error} {details}")
+        if details:
+            msg = f"{msg} ({details})"
+        raise RuntimeError(f"join_game failed: {msg}")
 
     client._game_result = None
     client._player_id = jr.player_id
