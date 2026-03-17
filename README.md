@@ -26,14 +26,6 @@ python3 -m venv .venv
                    cheatinsane (default: medium)
 ```
 
-### Available maps
-
-Melee pack (installed in `Maps/Melee/`):
-
-- **Simple64, Simple96, Simple128** — proper 1v1 maps with ramps, expansions, etc.
-- **Flat32, Flat48, Flat64, Flat96, Flat128** — flat open maps, good for testing
-- **Empty128** — completely empty
-
 ## How it works
 
 `run.py` launches SC2 in realtime mode and runs a `HarnessBot` that, on every game tick:
