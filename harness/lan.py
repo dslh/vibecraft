@@ -42,6 +42,43 @@ async def _run_lan_game(client, player_id):
         pass
 
 
+async def _join_game_checked(client, race, portconfig):
+    """Call join_game and check the response for errors.
+
+    python-sc2's Client.join_game doesn't inspect the error field, so a
+    failed join (wrong map, checksum mismatch, etc.) silently returns
+    player_id 0.  We call _execute directly and raise on failure.
+    """
+    from sc2.protocol import sc_pb
+
+    req = sc_pb.RequestJoinGame(
+        race=race.value,
+        options=sc_pb.InterfaceOptions(
+            raw=True, score=True, show_cloaked=True,
+            show_burrowed_shadows=True, raw_crop_to_playable_area=False,
+            show_placeholders=True,
+        ),
+    )
+    req.server_ports.game_port = portconfig.server[0]
+    req.server_ports.base_port = portconfig.server[1]
+    for ppc in portconfig.players:
+        p = req.client_ports.add()
+        p.game_port = ppc[0]
+        p.base_port = ppc[1]
+    req.host_ip = "127.0.0.1"
+
+    result = await client._execute(join_game=req)
+    jr = result.join_game
+
+    if jr.HasField("error"):
+        details = jr.error_details if jr.HasField("error_details") else ""
+        raise RuntimeError(f"join_game failed: error={jr.error} {details}")
+
+    client._game_result = None
+    client._player_id = jr.player_id
+    return jr.player_id
+
+
 async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int, lan_ip: str | None = None):
     # SC2 must listen on all interfaces, not just loopback — otherwise it
     # may skip game port networking entirely.
@@ -105,36 +142,8 @@ async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: i
             await tunnel.start_relays()
 
             client = Client(sc2._ws)
+            player_id = await _join_game_checked(client, race, portconfig)
 
-            from sc2 import protocol as sc_pb_mod
-            import sc2.protocol
-            req = sc2.protocol.sc_pb.RequestJoinGame(
-                race=race.value,
-                options=sc2.protocol.sc_pb.InterfaceOptions(
-                    raw=True, score=True, show_cloaked=True,
-                    show_burrowed_shadows=True, raw_crop_to_playable_area=False,
-                    show_placeholders=True,
-                ),
-            )
-            req.server_ports.game_port = portconfig.server[0]
-            req.server_ports.base_port = portconfig.server[1]
-            for ppc in portconfig.players:
-                p = req.client_ports.add()
-                p.game_port = ppc[0]
-                p.base_port = ppc[1]
-            req.host_ip = "127.0.0.1"
-
-            result = await client._execute(join_game=req)
-            jr = result.join_game
-            print(f"[harness] join_game response: player_id={jr.player_id}"
-                  f" error={jr.error if jr.HasField('error') else 'none'}"
-                  f" details={jr.error_details if jr.HasField('error_details') else 'none'}")
-
-            if jr.HasField("error"):
-                print(f"[harness] Join failed: {jr.error} — {jr.error_details}")
-                return
-
-            client._player_id = jr.player_id
-            await _run_lan_game(client, jr.player_id)
+            await _run_lan_game(client, player_id)
     finally:
         await tunnel.stop()
