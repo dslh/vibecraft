@@ -35,6 +35,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="SC2 Bot Harness with hot-reload")
     parser.add_argument("--map", default="Simple64", help="Map name (default: Simple64)")
+    parser.add_argument("--list-maps", action="store_true", help="List available maps and exit")
     parser.add_argument("--race", default="terran", choices=list(RACE_MAP.keys()), help="Bot race")
     parser.add_argument(
         "--human",
@@ -131,6 +132,21 @@ def main():
         help="SC2 installation path (default: auto-detect within Steam library)",
     )
     args = parser.parse_args()
+
+    if args.list_maps:
+        from pathlib import Path
+        from sc2.paths import Paths
+        maps_dir = Paths.MAPS
+        if not maps_dir.is_dir():
+            print(f"Maps directory not found: {maps_dir}")
+            sys.exit(1)
+        maps_found = sorted(p.stem for p in maps_dir.rglob("*.SC2Map"))
+        if not maps_found:
+            print("No maps found.")
+        else:
+            for name in maps_found:
+                print(name)
+        return
 
     if args.proton:
         from harness.proton import setup_proton
