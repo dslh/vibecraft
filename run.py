@@ -8,6 +8,7 @@ Usage:
     python run.py --human protoss --race zerg     # play against your own bot
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
+    python run.py --proton --race terran             # launch SC2 via Proton (Linux)
 
 While the game is running, edit bot_src/ and save. Your changes take effect
 on the next tick. If bot code has a syntax error or crashes, the harness
@@ -20,14 +21,8 @@ import sys
 
 from loguru import logger
 
-from sc2 import maps
 from sc2.data import Difficulty, Race
-from sc2.main import run_game
-from sc2.player import Bot, Computer, Human
 
-from harness.bot import BOT_PACKAGE, HarnessBot
-from harness.gauntlet import prep_countdown, run_gauntlet
-from harness.lan import get_lan_ip, host_lan_game, join_lan_game
 from harness.ports import DEFAULT_BASE_PORT
 
 RACE_MAP = {r.name.lower(): r for r in Race}
@@ -112,7 +107,44 @@ def main():
         action="store_true",
         help="Enable verbose logging from python-sc2 and SC2 process",
     )
+    parser.add_argument(
+        "--proton",
+        action="store_true",
+        help="Launch SC2 through Proton (for Linux/Steam Deck)",
+    )
+    parser.add_argument(
+        "--steam-path",
+        default=None,
+        metavar="PATH",
+        help="Steam installation root (default: auto-detect ~/.steam/steam or ~/.local/share/Steam)",
+    )
+    parser.add_argument(
+        "--proton-version",
+        default=None,
+        metavar="VERSION",
+        help='Proton version directory name (default: auto-detect latest, e.g. "Proton 10.0")',
+    )
+    parser.add_argument(
+        "--sc2-path",
+        default=None,
+        metavar="PATH",
+        help="SC2 installation path (default: auto-detect within Steam library)",
+    )
     args = parser.parse_args()
+
+    if args.proton:
+        from harness.proton import setup_proton
+        setup_proton(args)
+
+    # Deferred imports — these trigger sc2 path resolution, so Proton env
+    # vars must be configured first.
+    from sc2 import maps
+    from sc2.main import run_game
+    from sc2.player import Bot, Computer, Human
+
+    from harness.bot import BOT_PACKAGE, HarnessBot
+    from harness.gauntlet import prep_countdown, run_gauntlet
+    from harness.lan import host_lan_game, join_lan_game
 
     if args.verbose:
         logger.enable("sc2")
