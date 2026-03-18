@@ -225,11 +225,18 @@ def main():
         elif args.prep_time is None:
             input(f"  {label} — Press enter to start.")
 
-    run_game(
-        maps.get(args.map),
-        players,
-        realtime=True,
-    )
+    from harness.state_writer import write_game_ended_marker
+
+    try:
+        run_game(
+            maps.get(args.map),
+            players,
+            realtime=True,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        if not harness_bot._harness_state.game_ended:
+            write_game_ended_marker("ABANDONED")
+        raise
 
 
 if __name__ == "__main__":

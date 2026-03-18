@@ -95,7 +95,13 @@ def run_gauntlet(args, bot_race):
 
             game_start = time.time()
             players = [Bot(bot_race, harness_bot), Computer(enemy_race, difficulty)]
-            result = run_game(maps.get(args.map), players, realtime=True)
+            try:
+                result = run_game(maps.get(args.map), players, realtime=True)
+            except (KeyboardInterrupt, SystemExit):
+                if not harness_bot._harness_state.game_ended:
+                    from .state_writer import write_game_ended_marker
+                    write_game_ended_marker("ABANDONED")
+                raise
             game_time = time.time() - game_start
 
             if result == Result.Victory:

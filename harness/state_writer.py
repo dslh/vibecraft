@@ -74,6 +74,10 @@ class StateWriter:
             pass
         _write(os.path.join(STATE_DIR, "game.txt"), "\n".join(lines) + "\n")
 
+    def write_game_ended(self, result_text: str):
+        """Append a GAME ENDED marker to game.txt and snapshot.txt."""
+        write_game_ended_marker(result_text)
+
     def update(self, iteration: int):
         """Write snapshot."""
         try:
@@ -217,6 +221,19 @@ class StateWriter:
             lines.append("Enemy Structures: (unavailable)")
 
         _write(os.path.join(STATE_DIR, "snapshot.txt"), "\n".join(lines) + "\n")
+
+
+def write_game_ended_marker(result_text: str):
+    """Append a GAME ENDED marker to game.txt and snapshot.txt.
+
+    Can be called from anywhere — does not require a StateWriter instance.
+    Used for both normal game end and abandonment (Ctrl+C, SC2 closed).
+    """
+    marker = f"\nGAME ENDED - {result_text}\n"
+    for filename in ("game.txt", "snapshot.txt"):
+        path = os.path.join(STATE_DIR, filename)
+        if os.path.exists(path):
+            _append(path, marker)
 
 
 def _write(path: str, content: str):

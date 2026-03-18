@@ -1,3 +1,4 @@
+import asyncio
 import os
 import socket
 
@@ -32,7 +33,13 @@ async def _run_lan_game(client, player_id):
     print(f"[harness] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     print()
 
-    result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
+    try:
+        result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        if not harness_bot._harness_state.game_ended:
+            from .state_writer import write_game_ended_marker
+            write_game_ended_marker("ABANDONED")
+        raise
 
     print(f"[harness] Game ended: {result}")
 

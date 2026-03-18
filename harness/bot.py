@@ -120,6 +120,7 @@ class HarnessBot(BotAI):
             user_class=None,
             dashboard=None,
             lb=None,
+            game_ended=False,
         )
 
     async def _drain_commands(self):
@@ -474,6 +475,11 @@ class HarnessBot(BotAI):
                     await result
             except Exception:
                 pass
+        # Mark log files so readers know the game is over
+        hs.game_ended = True
+        result_text = game_result.name.upper() if game_result else "UNKNOWN"
+        if hs.dashboard and hs.dashboard.state_writer:
+            hs.dashboard.state_writer.write_game_ended(result_text)
         if hs.dashboard:
             hs.dashboard.log("harness", f"Game ended: {game_result}")
             # Final render so the user sees the end state briefly
