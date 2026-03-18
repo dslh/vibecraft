@@ -9,7 +9,7 @@ Requires StarCraft II installed at `/Applications/StarCraft II/` with maps in th
 ```bash
 # Create venv and install dependencies (one-time)
 python3 -m venv .venv
-.venv/bin/pip install -e ../python-sc2
+.venv/bin/pip install -e ./python-sc2
 
 # Run a game
 .venv/bin/python3 run.py

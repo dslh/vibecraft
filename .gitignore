@@ -3,3 +3,6 @@ log/
 commands/
 .chat_history
 .env
+.venv/
+python-sc2/
+s2client-proto/

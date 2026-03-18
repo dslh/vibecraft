@@ -1,7 +1,7 @@
 # SC2 bot direct dependencies
 # python-sc2 fork is installed separately in editable mode:
-#   pip install -e ../python-sc2
--e ../python-sc2
+#   pip install -e ./python-sc2
+-e ./python-sc2
 
 aiohttp
 claude-agent-sdk

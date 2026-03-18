@@ -65,7 +65,7 @@ ALL relative paths are relative to this directory. For example:
 - `cheatsheets/` — API reference files. Read `cheatsheets/api.md` (not just `api.md`). These are pre-written references — read them instead of digging through python-sc2 source.
   - `cheatsheets/api.md` — Shared API: BotAI state, Unit/Units, economy, building, tech, map, events, debug commands.
   - `cheatsheets/terran.md` / `cheatsheets/protoss.md` / `cheatsheets/zerg.md` — Race-specific units, abilities, upgrades.
-- `../python-sc2/` — The python-sc2 library source (available for deeper reference).
+- `python-sc2/` — The python-sc2 library source (available for deeper reference).
 
 ## How the Harness Works
 
@@ -432,7 +432,6 @@ async def main(verbose: bool = False):
     options = ClaudeAgentOptions(
         system_prompt=SYSTEM_PROMPT.format(bot_dir=BOT_DIR),
         cwd=BOT_DIR,
-        add_dirs=[os.path.join(SC2_DIR, "python-sc2")],
         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "mcp__sc2__*"],
         disallowed_tools=["Bash"],
         mcp_servers={
