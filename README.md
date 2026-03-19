@@ -4,15 +4,48 @@ A hot-reloading harness for developing StarCraft II bots interactively. Edit you
 
 ## Setup
 
-Requires StarCraft II installed at `/Applications/StarCraft II/` with maps in the `Maps/` subdirectory.
+Requires StarCraft II installed with maps in the `Maps/` subdirectory.
+
+### Quick start
+
+The setup script clones the repo, installs dependencies, and downloads the Melee map pack:
 
 ```bash
-# Create venv and install dependencies (one-time)
-python3 -m venv .venv
-.venv/bin/pip install -e ./python-sc2
+# macOS / Linux:
+curl -fsSL https://raw.githubusercontent.com/dslh/vibecraft/main/setup.sh | sh
 
-# Run a game
-.venv/bin/python3 run.py
+# Windows (PowerShell):
+irm https://raw.githubusercontent.com/dslh/vibecraft/main/setup.ps1 | iex
+```
+
+Then verify and run:
+
+```bash
+cd vibecraft
+.venv/bin/python3 run.py --test   # smoke test
+.venv/bin/python3 run.py          # start a game
+```
+
+### Manual setup
+
+If you prefer to set things up yourself:
+
+```bash
+git clone https://github.com/dslh/vibecraft.git && cd vibecraft
+git clone https://github.com/dslh/python-sc2.git
+git clone https://github.com/Blizzard/s2client-proto.git
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+### Verifying your setup
+
+`--test` runs a quick smoke test that launches SC2, connects over WebSocket, creates and joins a game, reads one observation, steps the simulation, and shuts down cleanly. It exits 0 on success, 1 on failure.
+
+```bash
+.venv/bin/python3 run.py --test              # uses default map (Simple64)
+.venv/bin/python3 run.py --test --map Acropolis  # test with a specific map
+.venv/bin/python3 run.py --test --proton     # test a Proton/Linux setup
 ```
 
 ### Options

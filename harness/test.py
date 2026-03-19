@@ -1,9 +1,14 @@
 """Smoke-test: launch SC2, connect, play through one game tick, then quit."""
 
 import asyncio
+import sys
 import time
 
 from loguru import logger
+
+# Suppress python-sc2's own logging — we print our own status lines.
+logger.remove()
+logger.add(sys.stderr, level="WARNING")
 
 from s2clientprotocol import sc2api_pb2 as sc_pb
 from sc2 import maps
