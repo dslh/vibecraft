@@ -64,11 +64,14 @@ python -m venv .venv
 
 ```
 --map NAME         Map to play on (default: Simple64)
+--list-maps        List available maps and exit
 --race RACE        Bot race: terran, zerg, protoss, random (default: terran)
+--human RACE       Play as a human against your bot (specify your race)
 --enemy-race RACE  Enemy race (default: random)
 --difficulty DIFF   AI difficulty: veryeasy, easy, medium, mediumhard,
                    hard, harder, veryhard, cheatvision, cheatmoney,
                    cheatinsane (default: medium)
+--verbose, -v      Enable verbose logging from python-sc2 and SC2 process
 ```
 
 ## How it works
@@ -82,6 +85,25 @@ python -m venv .venv
 5. Catches exceptions gracefully — a syntax error or crash skips that tick, the game keeps going
 
 This means you can split your bot across as many files as you want inside `bot_src/`. Edit any file and save — all changes take effect together on the next tick.
+
+If `on_step()` takes longer than 5 seconds, the harness interrupts it with a timeout error to prevent infinite loops from freezing the game.
+
+## Dashboard
+
+While a game is running, a real-time terminal dashboard (built with [Rich](https://github.com/Textualize/rich)) shows the current game state at a glance:
+
+- **Economy** — minerals, vespene, supply, workers (with idle count), bases, gas buildings
+- **Production** — in-progress unit training and research with progress bars
+- **Upgrades** — completed and in-progress upgrades
+- **Army** — composition breakdown by unit type and total army supply
+- **Map** — expansion count and creep coverage (Zerg)
+- **Enemy** — visible enemy units and structures
+- **Events** — recent game events: units lost/killed, buildings completed, upgrades, new enemy types spotted, bot log messages
+
+When a bot error occurs, a compact traceback appears at the bottom of the dashboard. Hotkeys:
+
+- **`e`** — Toggle between compact (last 3 lines) and expanded (full traceback) error view
+- **`c`** — Copy the full error to your clipboard
 
 ## Writing your bot
 
@@ -115,7 +137,7 @@ worker.gather(self.mineral_field.closest_to(worker))
 worker.attack(target)
 unit.move(position)
 townhall.train(UnitTypeId.SCV)
-self.do(worker.build(UnitTypeId.BARRACKS, position))
+worker.build(UnitTypeId.BARRACKS, position)
 ```
 
 **Instance variables** on `self` persist across hot-reloads. Use them to keep state between ticks:
@@ -238,39 +260,6 @@ Two players on the same network, each running SC2 locally:
 .venv/bin/python3 run.py --join 192.168.1.100 --race zerg
 ```
 
-### Remote mode
-
-Bot code runs on each player's machine; SC2 instances run on a shared server (or any machine). This decouples bot development from SC2 hosting — useful for live coding competitions.
-
-**On the server machine**, launch SC2 instances:
-
-```bash
-.venv/bin/python3 server.py
-```
-
-This starts two SC2 instances and prints their WebSocket URLs and the commands each player should run.
-
-**On each player's machine**, connect to a remote SC2 instance:
-
-```bash
-# Player 1 (creates the game):
-.venv/bin/python3 run.py --remote-host ws://SERVER:PORT/sc2api --race terran
-
-# Player 2 (joins the game — use the host-ip printed by server.py):
-.venv/bin/python3 run.py --remote-join ws://SERVER:PORT/sc2api --host-ip SERVER --race zerg
-```
-
-The `--host-ip` tells SC2 where the game-hosting instance lives so the two SC2 instances can sync with each other. For `--remote-host` it's auto-derived from the WebSocket URL; for `--remote-join` it must be specified explicitly.
-
-Both players edit `bot_src/` locally with full hot-reload, same as single-player mode.
-
-#### server.py options
-
-```
---instances N   Number of SC2 instances to launch (default: 2)
---verbose, -v   Enable debug logging
-```
-
 ### Gauntlet mode
 
 Play 7 escalating rounds (VeryEasy → VeryHard). Losses retry the same difficulty until you win or Ctrl+C:
@@ -287,11 +276,11 @@ Add a countdown between rounds:
 
 ### Multiplayer gauntlet (leaderboard)
 
-Run a [leaderboard server](../leaderboard/) and connect multiple players for a synchronized race through the gauntlet. Each player runs their own gauntlet against the AI — the leaderboard tracks who gets furthest, fastest.
+Run the leaderboard server and connect multiple players for a synchronized race through the gauntlet. Each player runs their own gauntlet against the AI — the leaderboard tracks who gets furthest, fastest.
 
 ```bash
 # On the server:
-python ../leaderboard/server.py --prep-time 10
+.venv/bin/python3 leaderboard.py --prep-time 10
 
 # Each player:
 .venv/bin/python3 run.py --gauntlet --leaderboard HOST:8080 --name alice --race terran
@@ -300,3 +289,54 @@ python ../leaderboard/server.py --prep-time 10
 Players connect and appear in the lobby. The operator presses Enter to start everyone simultaneously. A live web dashboard at `http://HOST:8080` shows standings.
 
 If a player disconnects and reconnects with the same `--name`, they resume from where they left off. If the leaderboard server goes down, games continue uninterrupted.
+
+## Proton / Linux support
+
+On Linux (including Steam Deck), SC2 runs through Proton. Add `--proton` to any command:
+
+```bash
+.venv/bin/python3 run.py --proton --race terran
+.venv/bin/python3 run.py --proton --test
+```
+
+The harness auto-detects your Steam installation, Proton version, and SC2 path. Override any of these if auto-detection fails:
+
+```
+--proton            Launch SC2 through Proton
+--steam-path PATH   Steam installation root (default: ~/.steam/steam or ~/.local/share/Steam)
+--proton-version V  Proton version directory name (e.g. "Proton 10.0")
+--sc2-path PATH     SC2 installation path
+```
+
+## AI chat assistant
+
+`chat.py` is an interactive chat interface for bot development, powered by the Claude API. It can read and edit your bot code, query the running game state, and execute commands in the game loop — all through natural conversation.
+
+```bash
+.venv/bin/python3 chat.py
+```
+
+Requires an `ANTHROPIC_API_KEY` in your `.env` file or environment (you'll be prompted to set one on first run).
+
+While the assistant is responding, press **Esc** to interrupt, or start typing to interrupt and begin a follow-up message.
+
+## MCP server
+
+`sc2_mcp.py` is an [MCP](https://modelcontextprotocol.io/) server that exposes game state and command execution as tools. This is what `chat.py` and Claude Code use to interact with a running game.
+
+Tools:
+
+| Tool | Description |
+|------|-------------|
+| `game_info` | Static metadata (race, map, opponent, start positions) |
+| `game_state` | Current resources, supply, army, structures, upgrades |
+| `game_events` | Recent event stream (units lost/killed, buildings, upgrades) |
+| `game_errors` | Recent bot errors with full tracebacks |
+| `bot_log` | Bot log messages from `self.log()` calls |
+| `run_command` | Execute Python code inside the game loop |
+
+Can be run standalone for use with any MCP client:
+
+```bash
+.venv/bin/python3 sc2_mcp.py
+```

@@ -60,7 +60,7 @@ def main():
     parser.add_argument(
         "--gauntlet",
         action="store_true",
-        help="Gauntlet mode: escalate difficulty from VeryEasy to VeryHard, stopping on first loss",
+        help="Gauntlet mode: escalate difficulty from VeryEasy to VeryHard, retrying on loss",
     )
     parser.add_argument(
         "--prep-time",
