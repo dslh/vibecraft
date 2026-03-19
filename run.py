@@ -9,6 +9,7 @@ Usage:
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
     python run.py --proton --race terran             # launch SC2 via Proton (Linux)
+    python run.py --test [--map Simple64]            # verify SC2 launches and responds
 
 While the game is running, edit bot_src/ and save. Your changes take effect
 on the next tick. If bot code has a syntax error or crashes, the harness
@@ -104,6 +105,11 @@ def main():
         help="Override auto-detected LAN IP (use 127.0.0.1 for local testing)",
     )
     parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Smoke-test: launch SC2, connect, create & join a game, read one observation, then quit",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose logging from python-sc2 and SC2 process",
@@ -151,6 +157,10 @@ def main():
     if args.proton:
         from harness.proton import setup_proton
         setup_proton(args)
+
+    if args.test:
+        from harness.test import run_test
+        sys.exit(run_test(args.map))
 
     # Deferred imports — these trigger sc2 path resolution, so Proton env
     # vars must be configured first.
