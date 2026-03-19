@@ -30,12 +30,24 @@ cd vibecraft
 
 If you prefer to set things up yourself:
 
+**macOS / Linux:**
+
 ```bash
 git clone https://github.com/dslh/vibecraft.git && cd vibecraft
 git clone https://github.com/dslh/python-sc2.git
 git clone https://github.com/Blizzard/s2client-proto.git
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/dslh/vibecraft.git; cd vibecraft
+git clone https://github.com/dslh/python-sc2.git
+git clone https://github.com/Blizzard/s2client-proto.git
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 ```
 
 ### Verifying your setup
