@@ -47,6 +47,7 @@ class PlayerState:
     minimap_config: dict | None = None
     minimap_units: list | None = None
     minimap_visibility: str | None = None
+    stats: dict | None = None
     ws: web.WebSocketResponse | None = field(default=None, repr=False)
     connected_at: float = field(default_factory=time.time)
 
@@ -94,6 +95,8 @@ class LeaderboardServer:
                 entry["minimap_units"] = p.minimap_units
             if p.minimap_visibility is not None:
                 entry["minimap_visibility"] = p.minimap_visibility
+            if p.stats:
+                entry["stats"] = p.stats
             players_data.append(entry)
         return web.json_response({
             "started": self.started,
@@ -206,6 +209,12 @@ class LeaderboardServer:
                         if p:
                             p.minimap_units = data.get("units")
                             p.minimap_visibility = data.get("visibility")
+                            _stat_keys = ("minerals", "vespene", "supply_used", "supply_cap",
+                                          "supply_army", "workers", "income_minerals",
+                                          "income_vespene", "killed_value")
+                            stats = {k: data[k] for k in _stat_keys if k in data}
+                            if stats:
+                                p.stats = stats
 
                 elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
                     break
@@ -216,6 +225,7 @@ class LeaderboardServer:
                     p.state = "disconnected"
                     p.minimap_units = None
                     p.minimap_visibility = None
+                    p.stats = None
                     p.ws = None
                     print(f"[server] {player_name} disconnected")
 
@@ -311,6 +321,9 @@ DASHBOARD_HTML = """\
     --red: #f85149;
     --blue: #58a6ff;
     --purple: #bc8cff;
+    --terran: #4a90d9;
+    --protoss: #d4af37;
+    --zerg: #9b59b6;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -360,66 +373,144 @@ DASHBOARD_HTML = """\
     padding: 0.4rem 1rem;
     font-size: 0.9rem;
   }
-  table {
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 1rem;
     width: 100%;
-    max-width: 900px;
-    border-collapse: collapse;
+    max-width: 1400px;
+  }
+  .card {
     background: var(--surface);
+    border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
-    border: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
   }
-  th {
-    text-align: left;
-    padding: 0.75rem 1rem;
-    background: var(--bg);
-    color: var(--text-dim);
-    font-weight: 600;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .card-header {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 0.8rem;
+    gap: 0.5rem;
     border-bottom: 1px solid var(--border);
   }
-  td {
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--border);
-    vertical-align: middle;
-  }
-  tr:last-child td { border-bottom: none; }
-  .rank {
+  .card-rank {
     font-weight: 700;
+    font-size: 1.1rem;
     color: var(--text-dim);
-    width: 3rem;
+    min-width: 2rem;
     text-align: center;
   }
-  .rank-1 { color: #ffd700; font-size: 1.2rem; }
-  .rank-2 { color: #c0c0c0; font-size: 1.1rem; }
-  .rank-3 { color: #cd7f32; font-size: 1.05rem; }
-  .player-name {
+  .card-rank.r1 { color: #ffd700; font-size: 1.3rem; }
+  .card-rank.r2 { color: #c0c0c0; font-size: 1.2rem; }
+  .card-rank.r3 { color: #cd7f32; font-size: 1.15rem; }
+  .card-name {
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 1.05rem;
+    flex: 1;
   }
-  .race {
+  .card-race {
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+  }
+  .race-terran { color: var(--terran); }
+  .race-protoss { color: var(--protoss); }
+  .race-zerg { color: var(--zerg); }
+  .race-random { color: var(--text-dim); }
+  .card-body {
+    display: flex;
+    padding: 0.8rem;
+    gap: 0.8rem;
+    flex: 1;
+  }
+  .card-minimap {
+    flex-shrink: 0;
+  }
+  .card-minimap canvas {
+    display: block;
+    border-radius: 4px;
+    background: #000;
+  }
+  .card-minimap-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background: rgba(0,0,0,0.3);
+    color: var(--text-dim);
+    font-size: 0.75rem;
+  }
+  .card-stats {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
+  }
+  .stat-row {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .stat {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.85rem;
+  }
+  .stat-label {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .stat-value {
+    font-weight: 600;
+  }
+  .stat-minerals { color: #4dd0e1; }
+  .stat-gas { color: #81c784; }
+  .stat-supply { color: var(--text); }
+  .stat-supply-warn { color: var(--yellow); }
+  .stat-supply-blocked { color: var(--red); }
+  .stat-army { color: var(--red); }
+  .stat-workers { color: var(--blue); }
+  .stat-income { color: var(--text-dim); }
+  .stat-killed { color: var(--yellow); }
+  .stats-idle {
     color: var(--text-dim);
     font-size: 0.85rem;
-    margin-left: 0.4rem;
+    font-style: italic;
+    display: flex;
+    align-items: center;
+    flex: 1;
+  }
+  .card-footer {
+    display: flex;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    gap: 0.5rem;
+    border-top: 1px solid var(--border);
   }
   .progress {
     display: flex;
     gap: 3px;
     align-items: center;
+    flex: 1;
   }
   .seg {
     width: 28px;
-    height: 18px;
+    height: 16px;
     border-radius: 3px;
     background: var(--border);
     position: relative;
     overflow: hidden;
   }
-  .seg.done {
-    background: var(--green);
-  }
+  .seg.done { background: var(--green); }
   .seg.current {
     background: var(--blue);
     animation: pulse 1.5s ease-in-out infinite;
@@ -434,7 +525,7 @@ DASHBOARD_HTML = """\
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.55rem;
+    font-size: 0.5rem;
     font-weight: 700;
     color: rgba(0,0,0,0.5);
   }
@@ -443,34 +534,22 @@ DASHBOARD_HTML = """\
     50% { opacity: 0.5; }
   }
   .status {
-    font-size: 0.85rem;
+    font-size: 0.75rem;
     font-weight: 600;
-    padding: 0.2rem 0.6rem;
+    padding: 0.15rem 0.5rem;
     border-radius: 999px;
-    display: inline-block;
+    white-space: nowrap;
   }
   .status-playing { background: rgba(63,185,80,0.15); color: var(--green); }
   .status-between_rounds { background: rgba(63,185,80,0.15); color: var(--green); }
   .status-waiting { background: rgba(210,153,34,0.15); color: var(--yellow); }
   .status-completed { background: rgba(88,166,255,0.15); color: var(--blue); }
   .status-disconnected { background: rgba(139,148,158,0.15); color: var(--text-dim); }
-  .time {
+  .footer-time {
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
-  }
-  .difficulty-labels {
-    display: flex;
-    gap: 3px;
-    max-width: 900px;
-    width: 100%;
-    padding: 0 1rem;
-    margin-bottom: 0.5rem;
-    justify-content: flex-end;
-  }
-  .minimap-cell canvas {
-    display: block;
-    border-radius: 3px;
-    background: #000;
+    font-size: 0.85rem;
+    white-space: nowrap;
   }
 </style>
 </head>
@@ -488,7 +567,7 @@ const MINIMAP_COLORS = [
   [45,212,191],  // 4 mineral — teal
   [188,140,255], // 5 gas — purple
 ];
-const MINIMAP_SIZE = 80;
+const MINIMAP_SIZE = 160;
 
 function decodeTerrain(b64, w, h) {
   const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -521,14 +600,12 @@ function renderMinimap(canvas, config, units, visB64) {
   const offX = (S - pw * scale) / 2;
   const offY = (S - ph * scale) / 2;
 
-  // Decode terrain once and cache on the canvas element
   if (config.terrain && !canvas._terrain) {
     canvas._terrain = decodeTerrain(config.terrain, mw, mh);
   }
   const terrain = canvas._terrain;
   const vis = visB64 ? decodeVisibility(visB64, mw, mh) : null;
 
-  // Render terrain + fog of war as pixel data
   const img = ctx.createImageData(S, S);
   const d = img.data;
   for (let cy = 0; cy < S; cy++) {
@@ -556,13 +633,12 @@ function renderMinimap(canvas, config, units, visB64) {
   }
   ctx.putImageData(img, 0, 0);
 
-  // Draw unit dots on top
   for (const u of (units || [])) {
     const sx = (u[0] - px) * scale + offX;
     const sy = S - ((u[1] - py) * scale + offY);
     const cat = u[2];
     const c = MINIMAP_COLORS[cat] || [255,255,255];
-    const r = (cat === 1 || cat === 3) ? 3 : 2;
+    const r = (cat === 1 || cat === 3) ? 4 : 3;
     ctx.fillStyle = "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
     ctx.fillRect(sx - r/2, sy - r/2, r, r);
   }
@@ -576,11 +652,22 @@ const STATUS_LABELS = {
   completed: "Complete",
   disconnected: "Offline",
 };
+const RACE_CLASSES = {
+  Terran: "race-terran",
+  Protoss: "race-protoss",
+  Zerg: "race-zerg",
+  Random: "race-random",
+};
 
 function formatTime(secs) {
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return m + ":" + String(s).padStart(2, "0");
+}
+
+function fmtNum(n) {
+  if (n == null) return "—";
+  return n.toLocaleString();
 }
 
 function hasRetried(p, roundIdx) {
@@ -591,11 +678,16 @@ function hasRetried(p, roundIdx) {
   return attempts > 1;
 }
 
+function supplyClass(used, cap) {
+  if (used >= cap && cap > 0) return "stat-supply-blocked";
+  if (cap > 0 && used >= cap - 2) return "stat-supply-warn";
+  return "stat-supply";
+}
+
 function render(data) {
   const app = document.getElementById("app");
 
   if (!data.started) {
-    // Lobby view
     let html = '<div class="lobby"><h2>Waiting for players...</h2>';
     html += '<p style="color:var(--text-dim)">Operator presses Enter to start</p>';
     html += '<div class="players">';
@@ -612,30 +704,76 @@ function render(data) {
     return;
   }
 
-  // Leaderboard table
-  let html = '<table><thead><tr>';
-  html += '<th style="text-align:center">Rank</th>';
-  html += '<th>Player</th>';
-  html += '<th>Progress</th>';
-  html += '<th>Map</th>';
-  html += '<th>Status</th>';
-  html += '<th style="text-align:right">Time</th>';
-  html += '</tr></thead><tbody>';
+  let html = '<div class="card-grid">';
 
   for (const p of data.players) {
-    html += '<tr>';
+    const raceClass = RACE_CLASSES[p.race] || "race-random";
+    const raceColor = p.race === "Terran" ? "var(--terran)" : p.race === "Protoss" ? "var(--protoss)" : p.race === "Zerg" ? "var(--zerg)" : "var(--border)";
+    const rankCls = p.rank <= 3 ? " r" + p.rank : "";
+    const isPlaying = p.state === "playing";
+    const hasMinimap = p.minimap_config && p.minimap_units && isPlaying;
+    const s = p.stats || {};
 
-    // Rank
-    const rankClass = p.rank <= 3 ? " rank-" + p.rank : "";
-    html += '<td class="rank' + rankClass + '">' + p.rank + '</td>';
+    html += '<div class="card" style="border-left: 3px solid ' + raceColor + '">';
 
-    // Name + race
-    html += '<td><span class="player-name">' + esc(p.name) + '</span>';
-    if (p.race) html += '<span class="race">' + esc(p.race) + '</span>';
-    html += '</td>';
+    // Header: rank, name, race
+    html += '<div class="card-header">';
+    html += '<span class="card-rank' + rankCls + '">#' + p.rank + '</span>';
+    html += '<span class="card-name">' + esc(p.name) + '</span>';
+    if (p.race) html += '<span class="card-race ' + raceClass + '">' + esc(p.race) + '</span>';
+    html += '</div>';
 
-    // Progress segments
-    html += '<td><div class="progress">';
+    // Body: minimap + stats
+    html += '<div class="card-body">';
+
+    // Minimap
+    html += '<div class="card-minimap">';
+    if (hasMinimap) {
+      html += '<canvas id="mm-' + esc(p.name) + '" width="' + MINIMAP_SIZE + '" height="' + MINIMAP_SIZE + '"></canvas>';
+    } else {
+      html += '<div class="card-minimap-placeholder" style="width:' + MINIMAP_SIZE + 'px;height:' + MINIMAP_SIZE + 'px">';
+      html += isPlaying ? "" : (p.state === "completed" ? "GG" : "—");
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // Stats panel
+    html += '<div class="card-stats">';
+    if (isPlaying && p.stats) {
+      // Resources
+      html += '<div class="stat-row">';
+      html += '<div class="stat"><span class="stat-label">Min</span> <span class="stat-value stat-minerals">' + fmtNum(s.minerals) + '</span></div>';
+      html += '<div class="stat"><span class="stat-label">Gas</span> <span class="stat-value stat-gas">' + fmtNum(s.vespene) + '</span></div>';
+      const sc = supplyClass(s.supply_used, s.supply_cap);
+      html += '<div class="stat"><span class="stat-label">Supply</span> <span class="stat-value ' + sc + '">' + (s.supply_used != null ? s.supply_used + "/" + s.supply_cap : "—") + '</span></div>';
+      html += '</div>';
+
+      // Army + Workers
+      html += '<div class="stat-row">';
+      html += '<div class="stat"><span class="stat-label">Army</span> <span class="stat-value stat-army">' + fmtNum(s.supply_army) + '</span></div>';
+      html += '<div class="stat"><span class="stat-label">Workers</span> <span class="stat-value stat-workers">' + fmtNum(s.workers) + '</span></div>';
+      html += '</div>';
+
+      // Income + Killed
+      html += '<div class="stat-row">';
+      html += '<div class="stat"><span class="stat-label">Income</span> <span class="stat-value stat-income">' + fmtNum(s.income_minerals) + '/' + fmtNum(s.income_vespene) + '</span></div>';
+      html += '<div class="stat"><span class="stat-label">Killed</span> <span class="stat-value stat-killed">' + fmtNum(s.killed_value) + '</span></div>';
+      html += '</div>';
+    } else {
+      html += '<div class="stats-idle">';
+      if (p.state === "completed") html += "Gauntlet complete!";
+      else if (p.state === "disconnected") html += "Disconnected";
+      else if (p.state === "between_rounds") html += "Between rounds";
+      else html += "Waiting...";
+      html += '</div>';
+    }
+    html += '</div>';  // card-stats
+
+    html += '</div>';  // card-body
+
+    // Footer: progress + status + time
+    html += '<div class="card-footer">';
+    html += '<div class="progress">';
     for (let i = 0; i < data.total_rounds; i++) {
       let cls = "seg";
       if (i <= p.highest_completed) {
@@ -645,27 +783,17 @@ function render(data) {
       }
       html += '<div class="' + cls + '"><span class="seg-label">' + DIFF_SHORT[i] + '</span></div>';
     }
-    html += '</div></td>';
-
-    // Minimap
-    html += '<td class="minimap-cell">';
-    if (p.minimap_config && p.minimap_units && p.state === "playing") {
-      html += '<canvas id="mm-' + esc(p.name) + '" width="' + MINIMAP_SIZE + '" height="' + MINIMAP_SIZE + '"></canvas>';
-    }
-    html += '</td>';
-
-    // Status
+    html += '</div>';
     const statusCls = "status status-" + p.state;
     const statusLabel = STATUS_LABELS[p.state] || p.state;
-    html += '<td><span class="' + statusCls + '">' + statusLabel + '</span></td>';
+    html += '<span class="' + statusCls + '">' + statusLabel + '</span>';
+    html += '<span class="footer-time">' + formatTime(p.elapsed) + '</span>';
+    html += '</div>';  // card-footer
 
-    // Time
-    html += '<td class="time" style="text-align:right">' + formatTime(p.elapsed) + '</td>';
-
-    html += '</tr>';
+    html += '</div>';  // card
   }
 
-  html += '</tbody></table>';
+  html += '</div>';  // card-grid
 
   app.innerHTML = html;
 

@@ -163,13 +163,16 @@ class LeaderboardClient:
             "terrain": terrain,
         })
 
-    def send_minimap(self, *, units: list, visibility: str):
+    def send_minimap(self, *, units: list, visibility: str, stats: dict | None = None):
         """Send unit positions and fog-of-war for the live minimap overlay."""
-        self._send({
+        msg = {
             "type": "minimap",
             "units": units,
             "visibility": visibility,
-        })
+        }
+        if stats:
+            msg.update(stats)
+        self._send(msg)
 
     def _send(self, data: dict):
         """Thread-safe send via the background event loop."""

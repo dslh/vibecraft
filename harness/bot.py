@@ -462,7 +462,19 @@ class HarnessBot(BotAI):
                 vis = np.concatenate([vis, np.zeros(pad, dtype=np.uint8)])
             packed = (vis[0::4] << 6) | (vis[1::4] << 4) | (vis[2::4] << 2) | vis[3::4]
             vis_b64 = base64.b64encode(packed.astype(np.uint8).tobytes()).decode("ascii")
-            hs.lb.send_minimap(units=units, visibility=vis_b64)
+            stats = {
+                "minerals": self.minerals,
+                "vespene": self.vespene,
+                "supply_used": self.supply_used,
+                "supply_cap": self.supply_cap,
+                "supply_army": self.supply_army,
+                "workers": self.workers.amount,
+                "income_minerals": round(self.state.score.collection_rate_minerals),
+                "income_vespene": round(self.state.score.collection_rate_vespene),
+                "killed_value": round(self.state.score.killed_value_units
+                                      + self.state.score.killed_value_structures),
+            }
+            hs.lb.send_minimap(units=units, visibility=vis_b64, stats=stats)
 
     async def on_end(self, game_result: Result):
         hs = self._harness_state
