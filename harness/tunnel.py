@@ -43,6 +43,7 @@ class Tunnel:
     def __init__(self, base_port, is_host):
         self.base_port = base_port
         self.is_host = is_host
+        self.peer_ip = None
         self._reader = None
         self._writer = None
         self._write_lock = asyncio.Lock()
@@ -60,6 +61,8 @@ class Tunnel:
         async def accept(reader, writer):
             t._reader = reader
             t._writer = writer
+            peername = writer.get_extra_info("peername")
+            t.peer_ip = peername[0] if peername else None
             t._ready.set()
 
         server = await asyncio.start_server(accept, "0.0.0.0", base_port)

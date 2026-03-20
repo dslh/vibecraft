@@ -100,6 +100,8 @@ class LeaderboardServer:
                 p.stats = None
                 p.game_time = 0.0
 
+            same_machine = p1.peer_ip == p2.peer_ip
+
             try:
                 await p1.ws.send_json({
                     "type": "match_assigned",
@@ -107,6 +109,7 @@ class LeaderboardServer:
                     "opponent_name": p2.name,
                     "opponent_ip": p2.peer_ip,
                     "base_port": base_port,
+                    "same_machine": same_machine,
                 })
                 await p2.ws.send_json({
                     "type": "match_assigned",
@@ -114,8 +117,10 @@ class LeaderboardServer:
                     "opponent_name": p1.name,
                     "opponent_ip": p1.peer_ip,
                     "base_port": base_port,
+                    "same_machine": same_machine,
                 })
-                print(f"[server] Matched {p1.name} (host) vs {p2.name} (joiner) on port {base_port}")
+                label = " (same machine)" if same_machine else ""
+                print(f"[server] Matched {p1.name} (host) vs {p2.name} (joiner) on port {base_port}{label}")
             except Exception as e:
                 print(f"[server] Failed to send match assignment: {e}")
 

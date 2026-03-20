@@ -113,7 +113,8 @@ async def _join_game_checked(client, race, portconfig):
     return jr.player_id
 
 
-async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int, lan_ip: str | None = None):
+async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: int,
+                        lan_ip: str | None = None):
     # SC2 must listen on all interfaces, not just loopback — otherwise it
     # may skip game port networking entirely.
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
@@ -134,6 +135,9 @@ async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: 
     print(f"[harness] Waiting for opponent to connect...")
 
     await tunnel.wait_for_peer()
+    same_machine = _is_local_ip(tunnel.peer_ip) if tunnel.peer_ip else False
+    if same_machine:
+        print(f"[harness] Same-machine detected — bypassing port relay")
     print(f"[harness] Opponent connected!")
 
     try:
@@ -149,7 +153,8 @@ async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: 
 
             print(f"[harness] Game created. Starting...")
 
-            await tunnel.start_relays()
+            if not same_machine:
+                await tunnel.start_relays()
 
             client = Client(sc2._ws)
             player_id = await client.join_game(
@@ -161,19 +166,36 @@ async def host_lan_game(map_name: str, race: Race, base_port: int, num_players: 
         await tunnel.stop()
 
 
+def _is_local_ip(ip: str) -> bool:
+    """Check if an IP address refers to this machine."""
+    if ip in ("127.0.0.1", "localhost", "::1"):
+        return True
+    try:
+        lan_ip = get_lan_ip()
+        return ip == lan_ip
+    except Exception:
+        return False
+
+
 async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: int):
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
+    same_machine = _is_local_ip(host_ip)
+    if same_machine:
+        print(f"[harness] Same-machine detected — bypassing port relay")
 
     # Game ports must match what the host uses
     portconfig = make_portconfig(base_port + 1, num_players)
 
-    print(f"[harness] Connecting to {host_ip}:{base_port}...")
-    tunnel = await Tunnel.connect(host_ip, base_port)
+    connect_ip = "127.0.0.1" if same_machine else host_ip
+    print(f"[harness] Connecting to {connect_ip}:{base_port}...")
+    tunnel = await Tunnel.connect(connect_ip, base_port)
     print(f"[harness] Connected!")
 
     try:
         async with SC2Process() as sc2:
-            await tunnel.start_relays()
+            if not same_machine:
+                await tunnel.start_relays()
 
             client = Client(sc2._ws)
             player_id = await _join_game_checked(client, race, portconfig)
@@ -184,7 +206,8 @@ async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: i
 
 
 async def host_pvp_game(map_name: str, race: Race, base_port: int,
-                        opponent_name: str = "", lb=None) -> tuple[Result | None, float]:
+                        opponent_name: str = "", lb=None,
+                        same_machine: bool = False) -> tuple[Result | None, float]:
     """Host a PvP game coordinated by the leaderboard server."""
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
 
@@ -210,7 +233,8 @@ async def host_pvp_game(map_name: str, race: Race, base_port: int,
 
             print(f"[arena] Game created. Starting...")
 
-            await tunnel.start_relays()
+            if not same_machine:
+                await tunnel.start_relays()
 
             client = Client(sc2._ws)
             player_id = await client.join_game(
@@ -225,19 +249,22 @@ async def host_pvp_game(map_name: str, race: Race, base_port: int,
 
 
 async def join_pvp_game(host_ip: str, map_name: str, race: Race, base_port: int,
-                        opponent_name: str = "", lb=None) -> tuple[Result | None, float]:
+                        opponent_name: str = "", lb=None,
+                        same_machine: bool = False) -> tuple[Result | None, float]:
     """Join a PvP game coordinated by the leaderboard server."""
     os.environ["SC2SERVERHOST"] = "0.0.0.0"
 
     portconfig = make_portconfig(base_port + 1, 2)
 
-    print(f"[arena] Connecting to {host_ip}:{base_port}...")
-    tunnel = await Tunnel.connect(host_ip, base_port)
+    connect_ip = "127.0.0.1" if same_machine else host_ip
+    print(f"[arena] Connecting to {connect_ip}:{base_port}...")
+    tunnel = await Tunnel.connect(connect_ip, base_port)
     print(f"[arena] Connected!")
 
     try:
         async with SC2Process() as sc2:
-            await tunnel.start_relays()
+            if not same_machine:
+                await tunnel.start_relays()
 
             client = Client(sc2._ws)
             player_id = await _join_game_checked(client, race, portconfig)

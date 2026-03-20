@@ -7,11 +7,14 @@ connected player (matchmade by the leaderboard server).
 """
 
 import asyncio
+import os
 import socket
 import time
 
-from rich.console import Console
-from rich.text import Text
+from prompt_toolkit import print_formatted_text, HTML
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
+from prompt_toolkit.styles import Style
 
 from sc2 import maps
 from sc2.data import Difficulty, Race, Result
@@ -28,92 +31,94 @@ DIFFICULTIES = [
     Difficulty.MediumHard, Difficulty.Hard, Difficulty.Harder, Difficulty.VeryHard,
 ]
 
-console = Console()
+# Shared dialog style — dark theme matching the dashboard
+DIALOG_STYLE = Style.from_dict({
+    "dialog":             "bg:#161b22 #c9d1d9",
+    "dialog frame.label": "bg:#161b22 #58a6ff bold",
+    "dialog.body":        "bg:#0d1117 #c9d1d9",
+    "dialog shadow":      "bg:#010409",
+    "button":             "bg:#30363d #c9d1d9",
+    "button.focused":     "bg:#58a6ff #0d1117 bold",
+    "radio-list":         "bg:#0d1117 #c9d1d9",
+    "radio":              "#58a6ff",
+    "radio-checked":      "#3fb950 bold",
+    "text-area":          "bg:#0d1117 #c9d1d9",
+})
 
 
-def _input(prompt: str) -> str:
-    """Prompt for input, stripping whitespace."""
-    try:
-        return input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        raise SystemExit(0)
+def _radio(title: str, values: list[tuple], default=None):
+    """Show a full-screen radio list dialog. Returns the selected value or None on cancel."""
+    result = radiolist_dialog(
+        title=title,
+        values=values,
+        default=default,
+        style=DIALOG_STYLE,
+    ).run()
+    return result
 
 
 def tui_registration(args) -> tuple[str, Race]:
     """Show the registration form and return (name, race)."""
-    console.print()
-    console.print("[bold]== SC2 Bot Arena ==[/bold]")
-    console.print()
-
-    # Name
     default_name = args.name or socket.gethostname().split(".")[0]
-    name = _input(f"  Name [{default_name}]: ") or default_name
 
-    # Race
-    console.print()
-    console.print("  Race:")
-    console.print("    [blue][1][/blue] Terran   [yellow][2][/yellow] Protoss   [purple][3][/purple] Zerg")
-    race_choice = _input("  > ")
+    name = input_dialog(
+        title="SC2 Bot Arena",
+        text="Enter your name:",
+        default=default_name,
+        style=DIALOG_STYLE,
+    ).run()
 
-    race_names = {"1": "terran", "2": "protoss", "3": "zerg"}
-    # Also accept the race name directly
-    race_key = race_names.get(race_choice, race_choice.lower())
-    if race_key not in RACE_MAP or RACE_MAP[race_key] == Race.Random:
-        console.print(f"  [dim]Defaulting to {args.race}[/dim]")
-        race_key = args.race
-    race = RACE_MAP[race_key]
+    if name is None:
+        raise SystemExit(0)
+    name = name.strip() or default_name
 
-    console.print()
-    console.print(f"  [bold]{name}[/bold] — [bold]{race.name}[/bold]")
-    console.print()
+    race = _radio("SC2 Bot Arena — Choose Race", [
+        (Race.Terran, "Terran"),
+        (Race.Protoss, "Protoss"),
+        (Race.Zerg, "Zerg"),
+    ], default=RACE_MAP.get(args.race, Race.Terran))
+
+    if race is None:
+        raise SystemExit(0)
 
     return name, race
 
 
 def show_main_menu() -> str:
     """Show the main menu and return the choice."""
-    console.print()
-    console.print("[bold]== Main Menu ==[/bold]")
-    console.print("  [cyan][1][/cyan] Play vs Computer")
-    console.print("  [green][2][/green] Play vs Player")
-    console.print("  [dim][3][/dim] Quit")
-    choice = _input("  > ")
+    choice = _radio("SC2 Bot Arena", [
+        ("cpu", "Play vs Computer"),
+        ("pvp", "Play vs Player"),
+        ("quit", "Quit"),
+    ], default="cpu")
 
-    if choice in ("1", "cpu"):
-        return "cpu"
-    elif choice in ("2", "pvp"):
-        return "pvp"
-    elif choice in ("3", "q", "quit"):
+    if choice is None:
         return "quit"
-    else:
-        return "cpu"  # default
+    return choice
 
 
 def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty]:
     """Show CPU game options and return (enemy_race, difficulty)."""
-    console.print()
-    console.print("  Enemy race:")
-    console.print("    [blue][1][/blue] Terran   [yellow][2][/yellow] Protoss   [purple][3][/purple] Zerg   [dim][4][/dim] Random")
-    race_choice = _input("  > ") or "4"
+    enemy_race = _radio("Enemy Race", [
+        (Race.Random, "Random"),
+        (Race.Terran, "Terran"),
+        (Race.Protoss, "Protoss"),
+        (Race.Zerg, "Zerg"),
+    ], default=Race.Random)
 
-    enemy_race_map = {"1": Race.Terran, "2": Race.Protoss, "3": Race.Zerg, "4": Race.Random}
-    enemy_race = enemy_race_map.get(race_choice, Race.Random)
+    if enemy_race is None:
+        enemy_race = Race.Random
 
-    console.print()
     default_diff = DIFFICULTIES[default_difficulty_idx]
-    console.print(f"  Difficulty [bold][{default_diff.name}][/bold]:")
-    for i, d in enumerate(DIFFICULTIES):
-        marker = " *" if i == default_difficulty_idx else ""
-        console.print(f"    [dim][{i + 1}][/dim] {d.name}{marker}")
-    diff_choice = _input("  > ")
+    diff_values = []
+    for d in DIFFICULTIES:
+        label = d.name
+        if d == default_diff:
+            label += "  (default)"
+        diff_values.append((d, label))
 
-    if diff_choice and diff_choice.isdigit():
-        idx = int(diff_choice) - 1
-        if 0 <= idx < len(DIFFICULTIES):
-            difficulty = DIFFICULTIES[idx]
-        else:
-            difficulty = default_diff
-    else:
+    difficulty = _radio("Difficulty", diff_values, default=default_diff)
+    if difficulty is None:
         difficulty = default_diff
 
     return enemy_race, difficulty
@@ -130,10 +135,8 @@ def play_cpu_game(args, race: Race, enemy_race: Race, difficulty: Difficulty,
     opponent_desc = f"{difficulty.name} {enemy_race.name}"
     lb.send_status(state="playing_cpu", opponent=opponent_desc)
 
-    console.print()
-    console.print(f"  [bold]Starting:[/bold] {race.name} vs {opponent_desc} on {args.map}")
-    console.print(f"  [dim]Edit files in {BOT_PACKAGE}/ while the game runs.[/dim]")
-    console.print()
+    print(f"\n  Starting: {race.name} vs {opponent_desc} on {args.map}")
+    print(f"  Edit files in {BOT_PACKAGE}/ while the game runs.\n")
 
     players = [Bot(race, harness_bot), Computer(enemy_race, difficulty)]
     game_start = time.time()
@@ -159,23 +162,24 @@ def play_pvp_game(args, race: Race, match: dict,
     opponent_name = match["opponent_name"]
     base_port = match["base_port"]
     opponent_ip = match.get("opponent_ip", "")
+    same_machine = match.get("same_machine", False)
 
     lb.send_status(state="playing_pvp", opponent=opponent_name)
 
-    console.print()
-    console.print(f"  [bold]PvP:[/bold] {role} vs {opponent_name} on {args.map}")
-    console.print(f"  [dim]Edit files in {BOT_PACKAGE}/ while the game runs.[/dim]")
-    console.print()
+    print(f"\n  PvP: {role} vs {opponent_name} on {args.map}")
+    print(f"  Edit files in {BOT_PACKAGE}/ while the game runs.\n")
 
     if role == "host":
         result, game_time = asyncio.run(
             host_pvp_game(args.map, race, base_port,
-                          opponent_name=opponent_name, lb=lb)
+                          opponent_name=opponent_name, lb=lb,
+                          same_machine=same_machine)
         )
     else:
         result, game_time = asyncio.run(
             join_pvp_game(opponent_ip, args.map, race, base_port,
-                          opponent_name=opponent_name, lb=lb)
+                          opponent_name=opponent_name, lb=lb,
+                          same_machine=same_machine)
         )
 
     return result, game_time
@@ -188,9 +192,9 @@ def run_arena(args):
     lb = LeaderboardClient(args.leaderboard, name=name, race=race.name)
     lb.start()
 
-    console.print(f"  [dim]Connecting to leaderboard at {args.leaderboard}...[/dim]")
+    print(f"  Connecting to leaderboard at {args.leaderboard}...")
     if not lb.wait_for_connect(timeout=15):
-        console.print("  [red]Could not connect to leaderboard server.[/red]")
+        print("  Could not connect to leaderboard server.")
         return
 
     # Default difficulty starts at Medium, bumps up on CPU wins
@@ -213,25 +217,32 @@ def run_arena(args):
                 )
 
                 if result == Result.Victory:
-                    console.print("  [green bold]Victory![/green bold]")
                     difficulty_idx = min(difficulty_idx + 1, len(DIFFICULTIES) - 1)
+                    message_dialog(
+                        title="Victory!",
+                        text=f"Won vs {opponent_desc} in {game_time:.0f}s",
+                        style=DIALOG_STYLE,
+                    ).run()
                 else:
-                    console.print(f"  [red]{result_name}[/red]")
+                    message_dialog(
+                        title=result_name,
+                        text=f"vs {opponent_desc} in {game_time:.0f}s",
+                        style=DIALOG_STYLE,
+                    ).run()
 
             elif choice == "pvp":
                 lb.queue_pvp()
-                console.print()
-                console.print("  [yellow]Waiting for opponent...[/yellow] (Ctrl+C to cancel)")
+                print("\n  Waiting for opponent... (Ctrl+C to cancel)")
 
                 try:
                     match = lb.wait_for_match(timeout=3600)
                 except KeyboardInterrupt:
                     lb.cancel_pvp()
-                    console.print("  [dim]Cancelled.[/dim]")
+                    print("  Cancelled.")
                     continue
 
                 if not match:
-                    console.print("  [red]Match cancelled.[/red]")
+                    print("  Match cancelled.")
                     continue
 
                 result, game_time = play_pvp_game(args, race, match, lb)
@@ -242,9 +253,17 @@ def run_arena(args):
                 )
 
                 if result == Result.Victory:
-                    console.print("  [green bold]Victory![/green bold]")
+                    message_dialog(
+                        title="Victory!",
+                        text=f"Won vs {match['opponent_name']} in {game_time:.0f}s",
+                        style=DIALOG_STYLE,
+                    ).run()
                 else:
-                    console.print(f"  [red]{result_name}[/red]")
+                    message_dialog(
+                        title=result_name,
+                        text=f"vs {match['opponent_name']} in {game_time:.0f}s",
+                        style=DIALOG_STYLE,
+                    ).run()
 
             elif choice == "quit":
                 break
@@ -255,5 +274,4 @@ def run_arena(args):
         lb.send_status(state="disconnected")
         time.sleep(0.3)
         lb.close()
-        console.print()
-        console.print("  [dim]Disconnected.[/dim]")
+        print("\n  Disconnected.")
