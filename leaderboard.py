@@ -1,74 +1,53 @@
 #!/usr/bin/env python3
 """
-Gauntlet Leaderboard Server.
+SC2 Bot Arena — Leaderboard Server.
 
-Coordinates multiplayer gauntlet runs. Players connect via WebSocket,
-the operator starts the gauntlet from stdin, and a live web dashboard
-shows standings.
+Players connect via WebSocket, appear on a live dashboard, and can
+be matched against each other for PvP games.
 
 Usage:
-    python server.py [--port 8080]
+    python leaderboard.py [--port 8080]
 
 Routes:
-    GET /     — HTML dashboard (polls /api/state every 2s)
+    GET /        — HTML dashboard (polls /api/state every 2s)
     GET /api/state — JSON snapshot of all players
-    GET /ws   — WebSocket upgrade for player connections
-
-Operator controls (stdin):
-    Enter — Send "go" to all waiting players
-    Ctrl+C — Shut down
+    GET /ws      — WebSocket upgrade for player connections
 """
 
 import argparse
 import asyncio
 import json
-import os
-import sys
 import time
 from dataclasses import dataclass, field
 
 from aiohttp import web, WSMsgType
-
-GAUNTLET_DIFFICULTIES = [
-    "VeryEasy", "Easy", "Medium", "MediumHard", "Hard", "Harder", "VeryHard",
-]
 
 
 @dataclass
 class PlayerState:
     name: str
     race: str = ""
-    map_name: str = ""
-    current_round: int = 0          # 0-indexed round they're on
-    highest_completed: int = -1     # highest 0-indexed round completed (-1 = none)
-    state: str = "waiting"          # waiting / playing / between_rounds / completed / disconnected
-    elapsed: float = 0.0            # total elapsed seconds reported by client
-    round_results: list = field(default_factory=list)  # list of {round, difficulty, result, game_time}
+    state: str = "idle"             # idle / queued_pvp / playing_cpu / playing_pvp / disconnected
+    opponent: str = ""              # "Medium Random" or "bob"
+    game_time: float = 0.0          # current game in-game time
+    game_history: list = field(default_factory=list)  # [{result, opponent, game_type, game_time}]
     minimap_config: dict | None = None
     minimap_units: list | None = None
     minimap_visibility: str | None = None
     stats: dict | None = None
     ws: web.WebSocketResponse | None = field(default=None, repr=False)
+    peer_ip: str = ""
     connected_at: float = field(default_factory=time.time)
 
 
 class LeaderboardServer:
-    def __init__(self, prep_time: int = 0):
+    def __init__(self):
         self.players: dict[str, PlayerState] = {}
-        self.started = False  # has the operator pressed Enter?
-        self.prep_time = prep_time
+        self._next_match_port = 5200
         self.app = web.Application()
         self.app.router.add_get("/", self.handle_dashboard)
         self.app.router.add_get("/api/state", self.handle_api_state)
         self.app.router.add_get("/ws", self.handle_ws)
-
-    # ── Ranking ──────────────────────────────────────────────────────
-
-    def ranked_players(self) -> list[PlayerState]:
-        """Players sorted by highest round (desc), then elapsed time (asc)."""
-        players = list(self.players.values())
-        players.sort(key=lambda p: (-p.highest_completed, p.elapsed))
-        return players
 
     # ── HTTP handlers ────────────────────────────────────────────────
 
@@ -76,18 +55,15 @@ class LeaderboardServer:
         return web.Response(text=DASHBOARD_HTML, content_type="text/html")
 
     async def handle_api_state(self, request: web.Request) -> web.Response:
-        ranked = self.ranked_players()
         players_data = []
-        for rank, p in enumerate(ranked, 1):
+        for p in self.players.values():
             entry = {
-                "rank": rank,
                 "name": p.name,
                 "race": p.race,
-                "current_round": p.current_round,
-                "highest_completed": p.highest_completed,
                 "state": p.state,
-                "elapsed": p.elapsed,
-                "round_results": p.round_results,
+                "opponent": p.opponent,
+                "game_time": p.game_time,
+                "game_history": p.game_history[-5:],  # last 5 results
             }
             if p.minimap_config:
                 entry["minimap_config"] = p.minimap_config
@@ -98,12 +74,50 @@ class LeaderboardServer:
             if p.stats:
                 entry["stats"] = p.stats
             players_data.append(entry)
-        return web.json_response({
-            "started": self.started,
-            "players": players_data,
-            "total_rounds": len(GAUNTLET_DIFFICULTIES),
-            "difficulties": GAUNTLET_DIFFICULTIES,
-        })
+        return web.json_response({"players": players_data})
+
+    # ── Matchmaking ──────────────────────────────────────────────────
+
+    async def _try_match(self):
+        """Pair up queued PvP players."""
+        queued = [p for p in self.players.values()
+                  if p.state == "queued_pvp" and p.ws and not p.ws.closed]
+        while len(queued) >= 2:
+            p1, p2 = queued.pop(0), queued.pop(0)
+            base_port = self._next_match_port
+            self._next_match_port += 10
+
+            p1.state = "playing_pvp"
+            p2.state = "playing_pvp"
+            p1.opponent = p2.name
+            p2.opponent = p1.name
+
+            # Clear stale minimap data from previous game
+            for p in (p1, p2):
+                p.minimap_config = None
+                p.minimap_units = None
+                p.minimap_visibility = None
+                p.stats = None
+                p.game_time = 0.0
+
+            try:
+                await p1.ws.send_json({
+                    "type": "match_assigned",
+                    "role": "host",
+                    "opponent_name": p2.name,
+                    "opponent_ip": p2.peer_ip,
+                    "base_port": base_port,
+                })
+                await p2.ws.send_json({
+                    "type": "match_assigned",
+                    "role": "joiner",
+                    "opponent_name": p1.name,
+                    "opponent_ip": p1.peer_ip,
+                    "base_port": base_port,
+                })
+                print(f"[server] Matched {p1.name} (host) vs {p2.name} (joiner) on port {base_port}")
+            except Exception as e:
+                print(f"[server] Failed to send match assignment: {e}")
 
     # ── WebSocket handler ────────────────────────────────────────────
 
@@ -111,6 +125,7 @@ class LeaderboardServer:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
 
+        peer_ip = request.remote or ""
         player_name = None
 
         try:
@@ -126,10 +141,8 @@ class LeaderboardServer:
                     if msg_type == "hello":
                         player_name = data.get("name", "unknown")
                         race = data.get("race", "")
-                        map_name = data.get("map", "")
 
                         if player_name in self.players:
-                            # Reconnection — preserve progress
                             old = self.players[player_name]
                             if old.ws is not None:
                                 try:
@@ -138,62 +151,62 @@ class LeaderboardServer:
                                     pass
                             old.ws = ws
                             old.race = race or old.race
-                            old.map_name = map_name or old.map_name
-                            old.state = "between_rounds"
-                            resume_round = old.highest_completed + 1
-                            print(f"[server] {player_name} reconnected — resuming at round {resume_round + 1}")
-                            await ws.send_json({
-                                "type": "welcome_back",
-                                "resume_round": resume_round,
-                                "elapsed_before": old.elapsed,
-                            })
+                            old.state = "idle"
+                            old.peer_ip = peer_ip
+                            print(f"[server] {player_name} reconnected ({peer_ip})")
                         else:
-                            # New player
                             self.players[player_name] = PlayerState(
                                 name=player_name,
                                 race=race,
-                                map_name=map_name,
                                 ws=ws,
+                                peer_ip=peer_ip,
                             )
-                            print(f"[server] {player_name} joined ({race})")
+                            print(f"[server] {player_name} joined ({race}, {peer_ip})")
 
-                            if self.started:
-                                # Late joiner — send go immediately
-                                await ws.send_json({"type": "go", "prep_time": self.prep_time})
-                            else:
-                                await ws.send_json({"type": "wait"})
+                        await ws.send_json({"type": "connected"})
 
                     elif msg_type == "status" and player_name:
                         p = self.players.get(player_name)
                         if p:
-                            p.current_round = data.get("round", p.current_round)
                             p.state = data.get("state", p.state)
-                            p.elapsed = data.get("elapsed", p.elapsed)
+                            p.opponent = data.get("opponent", p.opponent)
+                            p.game_time = data.get("game_time", p.game_time)
 
-                    elif msg_type == "round_complete" and player_name:
+                    elif msg_type == "game_complete" and player_name:
                         p = self.players.get(player_name)
                         if p:
-                            rnd = data.get("round", 0)
                             result = data.get("result", "")
                             game_time = data.get("game_time", 0)
-                            p.elapsed = data.get("elapsed", p.elapsed)
-                            p.round_results.append({
-                                "round": rnd,
-                                "difficulty": data.get("difficulty", ""),
+                            opponent = data.get("opponent", "")
+                            game_type = data.get("game_type", "")
+                            p.game_history.append({
                                 "result": result,
+                                "opponent": opponent,
+                                "game_type": game_type,
                                 "game_time": game_time,
                             })
-                            if result == "Victory":
-                                if rnd > p.highest_completed:
-                                    p.highest_completed = rnd
-                                if rnd >= len(GAUNTLET_DIFFICULTIES) - 1:
-                                    p.state = "completed"
-                                    print(f"[server] {player_name} COMPLETED the gauntlet! ({p.elapsed:.0f}s)")
-                                else:
-                                    p.state = "between_rounds"
-                            else:
-                                p.state = "between_rounds"
-                            print(f"[server] {player_name} round {rnd + 1}: {result} ({game_time:.0f}s)")
+                            p.state = "idle"
+                            p.game_time = 0.0
+                            # Clear minimap
+                            p.minimap_config = None
+                            p.minimap_units = None
+                            p.minimap_visibility = None
+                            p.stats = None
+                            print(f"[server] {player_name}: {result} vs {opponent} ({game_time:.0f}s)")
+
+                    elif msg_type == "queue_pvp" and player_name:
+                        p = self.players.get(player_name)
+                        if p:
+                            p.state = "queued_pvp"
+                            p.opponent = ""
+                            print(f"[server] {player_name} queued for PvP")
+                            await self._try_match()
+
+                    elif msg_type == "cancel_pvp" and player_name:
+                        p = self.players.get(player_name)
+                        if p and p.state == "queued_pvp":
+                            p.state = "idle"
+                            print(f"[server] {player_name} left PvP queue")
 
                     elif msg_type == "minimap_init" and player_name:
                         p = self.players.get(player_name)
@@ -222,6 +235,7 @@ class LeaderboardServer:
             if player_name and player_name in self.players:
                 p = self.players[player_name]
                 if p.ws is ws:
+                    was_queued = p.state == "queued_pvp"
                     p.state = "disconnected"
                     p.minimap_units = None
                     p.minimap_visibility = None
@@ -229,73 +243,27 @@ class LeaderboardServer:
                     p.ws = None
                     print(f"[server] {player_name} disconnected")
 
+                    # If they were queued, no action needed — they're just gone.
+                    # If they were in a PvP game, SC2 handles the disconnect.
+
         return ws
 
-    # ── Operator console ─────────────────────────────────────────────
-
-    async def on_stdin_ready(self):
-        """Called when stdin has data (operator pressed a key)."""
-        # Non-blocking read — consume whatever is available without risking
-        # a blocking readline() that would freeze the event loop.
-        try:
-            data = os.read(sys.stdin.fileno(), 4096)
-        except (OSError, BlockingIOError):
-            return
-        if not data or b"\n" not in data:
-            return
-
-        if not self.started:
-            self.started = True
-            n = 0
-            for p in self.players.values():
-                if p.ws is not None and not p.ws.closed:
-                    try:
-                        await p.ws.send_json({"type": "go", "prep_time": self.prep_time})
-                        n += 1
-                    except Exception:
-                        pass
-            print(f"[server] GO! Sent start signal to {n} player(s)")
-        else:
-            # Show current standings
-            ranked = self.ranked_players()
-            print(f"\n[server] Current standings ({len(ranked)} players):")
-            for i, p in enumerate(ranked, 1):
-                diff = GAUNTLET_DIFFICULTIES[min(p.current_round, len(GAUNTLET_DIFFICULTIES) - 1)]
-                print(f"  {i}. {p.name} — round {p.highest_completed + 2}/{len(GAUNTLET_DIFFICULTIES)} "
-                      f"({diff}) [{p.state}] {p.elapsed:.0f}s")
-            print()
-
     async def start(self, port: int):
-        loop = asyncio.get_event_loop()
-
-        # Set stdin to non-blocking so os.read() in on_stdin_ready never blocks
-        import fcntl
-        fd = sys.stdin.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-        loop.add_reader(fd, lambda: asyncio.ensure_future(self.on_stdin_ready()))
-
         runner = web.AppRunner(self.app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
 
-        n_players = len(self.players)
-        print(f"[server] Leaderboard server running on http://0.0.0.0:{port}")
+        print(f"[server] SC2 Bot Arena running on http://0.0.0.0:{port}")
         print(f"[server] Dashboard: http://localhost:{port}")
-        print(f"[server] Waiting for players to connect...")
-        print(f"[server] Press Enter to start the gauntlet")
         print()
 
-        # Run forever
         try:
             while True:
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             pass
         finally:
-            loop.remove_reader(sys.stdin.fileno())
             await runner.cleanup()
 
 
@@ -307,7 +275,7 @@ DASHBOARD_HTML = """\
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SC2 Gauntlet Leaderboard</title>
+<title>SC2 Bot Arena</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -346,33 +314,6 @@ DASHBOARD_HTML = """\
     margin-bottom: 2rem;
     font-size: 0.95rem;
   }
-  .lobby {
-    text-align: center;
-    padding: 3rem;
-    border: 1px dashed var(--border);
-    border-radius: 8px;
-    max-width: 500px;
-    width: 100%;
-  }
-  .lobby h2 {
-    color: var(--yellow);
-    margin-bottom: 1rem;
-    font-size: 1.2rem;
-  }
-  .lobby .players {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    justify-content: center;
-    margin-top: 1rem;
-  }
-  .lobby .player-chip {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.4rem 1rem;
-    font-size: 0.9rem;
-  }
   .card-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -395,16 +336,6 @@ DASHBOARD_HTML = """\
     gap: 0.5rem;
     border-bottom: 1px solid var(--border);
   }
-  .card-rank {
-    font-weight: 700;
-    font-size: 1.1rem;
-    color: var(--text-dim);
-    min-width: 2rem;
-    text-align: center;
-  }
-  .card-rank.r1 { color: #ffd700; font-size: 1.3rem; }
-  .card-rank.r2 { color: #c0c0c0; font-size: 1.2rem; }
-  .card-rank.r3 { color: #cd7f32; font-size: 1.15rem; }
   .card-name {
     font-weight: 600;
     font-size: 1.05rem;
@@ -496,39 +427,21 @@ DASHBOARD_HTML = """\
     gap: 0.5rem;
     border-top: 1px solid var(--border);
   }
-  .progress {
+  .history {
     display: flex;
-    gap: 3px;
-    align-items: center;
+    gap: 4px;
     flex: 1;
+    flex-wrap: wrap;
   }
-  .seg {
-    width: 28px;
-    height: 16px;
-    border-radius: 3px;
-    background: var(--border);
-    position: relative;
-    overflow: hidden;
+  .history-chip {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    white-space: nowrap;
   }
-  .seg.done { background: var(--green); }
-  .seg.current {
-    background: var(--blue);
-    animation: pulse 1.5s ease-in-out infinite;
-  }
-  .seg.retry {
-    background: var(--yellow);
-    animation: pulse 1.5s ease-in-out infinite;
-  }
-  .seg-label {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.5rem;
-    font-weight: 700;
-    color: rgba(0,0,0,0.5);
-  }
+  .history-chip.win { background: rgba(63,185,80,0.2); color: var(--green); }
+  .history-chip.loss { background: rgba(248,81,73,0.15); color: var(--red); }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
@@ -540,10 +453,13 @@ DASHBOARD_HTML = """\
     border-radius: 999px;
     white-space: nowrap;
   }
-  .status-playing { background: rgba(63,185,80,0.15); color: var(--green); }
-  .status-between_rounds { background: rgba(63,185,80,0.15); color: var(--green); }
-  .status-waiting { background: rgba(210,153,34,0.15); color: var(--yellow); }
-  .status-completed { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .status-idle { background: rgba(139,148,158,0.15); color: var(--text-dim); }
+  .status-queued_pvp {
+    background: rgba(210,153,34,0.15); color: var(--yellow);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  .status-playing_cpu { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .status-playing_pvp { background: rgba(63,185,80,0.15); color: var(--green); }
   .status-disconnected { background: rgba(139,148,158,0.15); color: var(--text-dim); }
   .footer-time {
     font-variant-numeric: tabular-nums;
@@ -551,21 +467,27 @@ DASHBOARD_HTML = """\
     font-size: 0.85rem;
     white-space: nowrap;
   }
+  .no-players {
+    text-align: center;
+    padding: 3rem;
+    color: var(--text-dim);
+    font-size: 1.1rem;
+  }
 </style>
 </head>
 <body>
-<h1>SC2 Gauntlet</h1>
-<p class="subtitle">Leaderboard</p>
+<h1>SC2 Bot Arena</h1>
+<p class="subtitle">Live Dashboard</p>
 <div id="app"></div>
 
 <script>
 const MINIMAP_COLORS = [
-  [63,185,80],   // 0 own unit — green
-  [88,166,255],  // 1 own structure — blue
-  [248,81,73],   // 2 enemy unit — red
-  [210,153,34],  // 3 enemy structure — yellow
-  [45,212,191],  // 4 mineral — teal
-  [188,140,255], // 5 gas — purple
+  [63,185,80],   // 0 own unit
+  [88,166,255],  // 1 own structure
+  [248,81,73],   // 2 enemy unit
+  [210,153,34],  // 3 enemy structure
+  [45,212,191],  // 4 mineral
+  [188,140,255], // 5 gas
 ];
 const MINIMAP_SIZE = 160;
 
@@ -644,14 +566,14 @@ function renderMinimap(canvas, config, units, visB64) {
   }
 }
 
-const DIFF_SHORT = ["VE", "E", "M", "MH", "H", "Hr", "VH"];
 const STATUS_LABELS = {
-  waiting: "Waiting",
-  playing: "Playing",
-  between_rounds: "Ready",
-  completed: "Complete",
+  idle: "In Menu",
+  queued_pvp: "Queued PvP",
+  playing_cpu: "vs CPU",
+  playing_pvp: "vs Player",
   disconnected: "Offline",
 };
+
 const RACE_CLASSES = {
   Terran: "race-terran",
   Protoss: "race-protoss",
@@ -670,14 +592,6 @@ function fmtNum(n) {
   return n.toLocaleString();
 }
 
-function hasRetried(p, roundIdx) {
-  let attempts = 0;
-  for (const r of p.round_results) {
-    if (r.round === roundIdx) attempts++;
-  }
-  return attempts > 1;
-}
-
 function supplyClass(used, cap) {
   if (used >= cap && cap > 0) return "stat-supply-blocked";
   if (cap > 0 && used >= cap - 2) return "stat-supply-warn";
@@ -687,20 +601,8 @@ function supplyClass(used, cap) {
 function render(data) {
   const app = document.getElementById("app");
 
-  if (!data.started) {
-    let html = '<div class="lobby"><h2>Waiting for players...</h2>';
-    html += '<p style="color:var(--text-dim)">Operator presses Enter to start</p>';
-    html += '<div class="players">';
-    for (const p of data.players) {
-      html += '<span class="player-chip">' + esc(p.name);
-      if (p.race) html += ' <span style="color:var(--text-dim)">(' + esc(p.race) + ')</span>';
-      html += '</span>';
-    }
-    if (data.players.length === 0) {
-      html += '<span style="color:var(--text-dim)">No players connected yet</span>';
-    }
-    html += '</div></div>';
-    app.innerHTML = html;
+  if (data.players.length === 0) {
+    app.innerHTML = '<div class="no-players">No players connected</div>';
     return;
   }
 
@@ -709,16 +611,14 @@ function render(data) {
   for (const p of data.players) {
     const raceClass = RACE_CLASSES[p.race] || "race-random";
     const raceColor = p.race === "Terran" ? "var(--terran)" : p.race === "Protoss" ? "var(--protoss)" : p.race === "Zerg" ? "var(--zerg)" : "var(--border)";
-    const rankCls = p.rank <= 3 ? " r" + p.rank : "";
-    const isPlaying = p.state === "playing";
+    const isPlaying = p.state === "playing_cpu" || p.state === "playing_pvp";
     const hasMinimap = p.minimap_config && p.minimap_units && isPlaying;
     const s = p.stats || {};
 
     html += '<div class="card" style="border-left: 3px solid ' + raceColor + '">';
 
-    // Header: rank, name, race
+    // Header: name, race
     html += '<div class="card-header">';
-    html += '<span class="card-rank' + rankCls + '">#' + p.rank + '</span>';
     html += '<span class="card-name">' + esc(p.name) + '</span>';
     if (p.race) html += '<span class="card-race ' + raceClass + '">' + esc(p.race) + '</span>';
     html += '</div>';
@@ -732,7 +632,7 @@ function render(data) {
       html += '<canvas id="mm-' + esc(p.name) + '" width="' + MINIMAP_SIZE + '" height="' + MINIMAP_SIZE + '"></canvas>';
     } else {
       html += '<div class="card-minimap-placeholder" style="width:' + MINIMAP_SIZE + 'px;height:' + MINIMAP_SIZE + 'px">';
-      html += isPlaying ? "" : (p.state === "completed" ? "GG" : "—");
+      html += isPlaying ? "" : "—";
       html += '</div>';
     }
     html += '</div>';
@@ -761,33 +661,39 @@ function render(data) {
       html += '</div>';
     } else {
       html += '<div class="stats-idle">';
-      if (p.state === "completed") html += "Gauntlet complete!";
+      if (p.state === "queued_pvp") html += "Waiting for opponent...";
       else if (p.state === "disconnected") html += "Disconnected";
-      else if (p.state === "between_rounds") html += "Between rounds";
-      else html += "Waiting...";
+      else if (isPlaying) html += "Starting...";
+      else html += "In menu";
       html += '</div>';
     }
     html += '</div>';  // card-stats
 
     html += '</div>';  // card-body
 
-    // Footer: progress + status + time
+    // Footer: opponent/status + game history + time
     html += '<div class="card-footer">';
-    html += '<div class="progress">';
-    for (let i = 0; i < data.total_rounds; i++) {
-      let cls = "seg";
-      if (i <= p.highest_completed) {
-        cls += " done";
-      } else if (i === p.current_round && (p.state === "playing" || p.state === "between_rounds")) {
-        cls += hasRetried(p, i) ? " retry" : " current";
-      }
-      html += '<div class="' + cls + '"><span class="seg-label">' + DIFF_SHORT[i] + '</span></div>';
+
+    // Recent game history chips
+    html += '<div class="history">';
+    for (const g of (p.game_history || [])) {
+      const isWin = g.result === "Victory";
+      const cls = isWin ? "win" : "loss";
+      const label = (isWin ? "W" : "L") + " vs " + esc(g.opponent);
+      html += '<span class="history-chip ' + cls + '">' + label + '</span>';
     }
     html += '</div>';
+
     const statusCls = "status status-" + p.state;
-    const statusLabel = STATUS_LABELS[p.state] || p.state;
+    let statusLabel = STATUS_LABELS[p.state] || p.state;
+    if (isPlaying && p.opponent) {
+      statusLabel += ": " + esc(p.opponent);
+    }
     html += '<span class="' + statusCls + '">' + statusLabel + '</span>';
-    html += '<span class="footer-time">' + formatTime(p.elapsed) + '</span>';
+
+    if (isPlaying && p.game_time > 0) {
+      html += '<span class="footer-time">' + formatTime(p.game_time) + '</span>';
+    }
     html += '</div>';  // card-footer
 
     html += '</div>';  // card
@@ -798,7 +704,9 @@ function render(data) {
   app.innerHTML = html;
 
   // Render minimap canvases after DOM update
-  const playing = data.players.filter(p => p.state === "playing" && p.minimap_config && p.minimap_units);
+  const playing = data.players.filter(p =>
+    (p.state === "playing_cpu" || p.state === "playing_pvp") && p.minimap_config && p.minimap_units
+  );
   for (const p of playing) {
     const canvas = document.getElementById("mm-" + p.name);
     if (canvas) renderMinimap(canvas, p.minimap_config, p.minimap_units, p.minimap_visibility);
@@ -830,14 +738,11 @@ setInterval(poll, 2000);
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SC2 Gauntlet Leaderboard Server")
+    parser = argparse.ArgumentParser(description="SC2 Bot Arena — Leaderboard Server")
     parser.add_argument("--port", type=int, default=8080, help="Port to listen on (default: 8080)")
-    parser.add_argument("--prep-time", type=int, default=None, metavar="SECONDS",
-                        help="Countdown before each round (sent to all clients). "
-                             "Omit for interactive 'press enter' prompt between matches.")
     args = parser.parse_args()
 
-    server = LeaderboardServer(prep_time=args.prep_time)
+    server = LeaderboardServer()
     try:
         asyncio.run(server.start(args.port))
     except KeyboardInterrupt:

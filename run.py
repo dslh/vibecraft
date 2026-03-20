@@ -4,7 +4,7 @@ SC2 Bot Harness — hot-reloads bot_src/ on every game tick.
 Usage:
     python run.py [--map MAP_NAME] [--race RACE] [--difficulty DIFFICULTY]
     python run.py --gauntlet [--prep-time 10]     # escalate VeryEasy → VeryHard
-    python run.py --gauntlet --leaderboard HOST:PORT --name alice  # multiplayer gauntlet
+    python run.py --leaderboard HOST:PORT [--name alice]  # arena mode with leaderboard
     python run.py --human protoss --race zerg     # play against your own bot
     python run.py --host --race terran            # host a LAN game
     python run.py --join 192.168.1.100 --race zerg  # join a LAN game
@@ -74,7 +74,7 @@ def main():
         "--leaderboard",
         default=None,
         metavar="HOST:PORT",
-        help="Connect to a leaderboard server for multiplayer gauntlet (e.g. localhost:8080)",
+        help="Connect to a leaderboard server for arena mode (e.g. localhost:8080)",
     )
     parser.add_argument(
         "--name",
@@ -162,6 +162,11 @@ def main():
         from harness.test import run_test
         sys.exit(run_test(args.map))
 
+    if args.leaderboard:
+        from harness.arena import run_arena
+        run_arena(args)
+        return
+
     # Deferred imports — these trigger sc2 path resolution, so Proton env
     # vars must be configured first.
     from sc2 import maps
@@ -193,8 +198,6 @@ def main():
 
     if args.gauntlet and args.human:
         parser.error("--gauntlet cannot be used with --human")
-    if args.leaderboard and not args.gauntlet:
-        parser.error("--leaderboard requires --gauntlet")
 
     if args.host:
         asyncio.run(host_lan_game(args.map, bot_race, args.base_port, args.players, lan_ip=args.lan_ip))

@@ -1,17 +1,19 @@
 """
-Leaderboard WebSocket client for gauntlet mode.
+Leaderboard WebSocket client for arena mode.
 
 Runs an aiohttp WebSocket connection on a background daemon thread
 with its own event loop. The main thread (which is blocked inside
 run_game() → asyncio.run()) calls thread-safe methods to send
-status updates and wait for the start signal.
+status updates and wait for matchmaking.
 
 Usage:
-    lb = LeaderboardClient("localhost:8080", name="alice", race="Terran", map_name="Simple64")
+    lb = LeaderboardClient("localhost:8080", name="alice", race="Terran")
     lb.start()
-    lb.wait_for_go()          # blocks until operator presses Enter on server
-    # ... run games ...
-    lb.send_round_complete(round_idx=0, difficulty="VeryEasy", result="Victory", game_time=120.5, elapsed=120.5)
+    lb.wait_for_connect()
+    lb.send_status(state="playing_cpu", opponent="Medium Random", game_time=0)
+    lb.send_game_complete(result="Victory", game_time=120.5, opponent="Medium Random", game_type="cpu")
+    lb.queue_pvp()
+    match = lb.wait_for_match()  # blocks until paired
     lb.close()
 """
 
@@ -20,30 +22,26 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 
 import aiohttp
 
 
 class LeaderboardClient:
-    def __init__(self, address: str, *, name: str, race: str, map_name: str):
+    def __init__(self, address: str, *, name: str, race: str):
         self.address = address
         self.name = name
         self.race = race
-        self.map_name = map_name
 
         # Threading primitives
-        self._go_event = threading.Event()
+        self._connect_event = threading.Event()
+        self._match_event = threading.Event()
+        self._match_info: dict | None = None
+        self._match_cancelled_reason: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._connected = False
-
-        # Set by server on go/reconnect (None = press-enter prompt)
-        self.prep_time: int | None = None
-        self.resume_round: int | None = None
-        self.elapsed_before: float = 0.0
 
     def start(self):
         """Start the background thread and connect to the server."""
@@ -66,7 +64,8 @@ class LeaderboardClient:
             self._loop.close()
             self._loop = None
             # Unblock main thread if still waiting
-            self._go_event.set()
+            self._connect_event.set()
+            self._match_event.set()
 
     async def _connect_and_listen(self):
         """Connect to the leaderboard server and listen for messages."""
@@ -77,7 +76,7 @@ class LeaderboardClient:
             self._connected = True
         except Exception as e:
             print(f"[leaderboard] Could not connect to {url}: {e}")
-            self._go_event.set()  # Don't block the main thread
+            self._connect_event.set()
             return
 
         print(f"[leaderboard] Connected to {url}")
@@ -87,7 +86,6 @@ class LeaderboardClient:
             "type": "hello",
             "name": self.name,
             "race": self.race,
-            "map": self.map_name,
         })
 
         # Listen for messages
@@ -101,19 +99,22 @@ class LeaderboardClient:
 
                     msg_type = data.get("type")
 
-                    if msg_type == "wait":
-                        print(f"[leaderboard] Waiting for operator to start...")
+                    if msg_type == "connected":
+                        print(f"[leaderboard] Registered as '{self.name}'")
+                        self._connect_event.set()
 
-                    elif msg_type == "go":
-                        self.prep_time = data.get("prep_time")
-                        print(f"[leaderboard] GO!")
-                        self._go_event.set()
+                    elif msg_type == "match_assigned":
+                        self._match_info = data
+                        role = data.get("role", "?")
+                        opponent = data.get("opponent_name", "?")
+                        print(f"[leaderboard] Match found! {role} vs {opponent}")
+                        self._match_event.set()
 
-                    elif msg_type == "welcome_back":
-                        self.resume_round = data.get("resume_round", 0)
-                        self.elapsed_before = data.get("elapsed_before", 0.0)
-                        print(f"[leaderboard] Reconnected — resuming at round {self.resume_round + 1}")
-                        self._go_event.set()
+                    elif msg_type == "match_cancelled":
+                        reason = data.get("reason", "unknown")
+                        print(f"[leaderboard] Match cancelled: {reason}")
+                        self._match_cancelled_reason = reason
+                        self._match_event.set()
 
                 elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                     break
@@ -128,34 +129,50 @@ class LeaderboardClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    def wait_for_go(self, timeout: float = 3600):
-        """Block the main thread until the server sends 'go'. Returns True if go received."""
-        return self._go_event.wait(timeout=timeout)
+    def wait_for_connect(self, timeout: float = 30) -> bool:
+        """Block until the server acknowledges our hello."""
+        return self._connect_event.wait(timeout=timeout)
 
-    def send_status(self, *, round_idx: int, difficulty: str, state: str, elapsed: float):
-        """Send a status update to the server (non-blocking, fire-and-forget)."""
+    def send_status(self, *, state: str, opponent: str = "", game_time: float = 0.0):
+        """Send a status update to the server."""
         self._send({
             "type": "status",
-            "round": round_idx,
-            "difficulty": difficulty,
             "state": state,
-            "elapsed": elapsed,
+            "opponent": opponent,
+            "game_time": game_time,
         })
 
-    def send_round_complete(self, *, round_idx: int, difficulty: str, result: str,
-                            game_time: float, elapsed: float):
-        """Send round completion to the server (non-blocking, fire-and-forget)."""
+    def send_game_complete(self, *, result: str, game_time: float,
+                           opponent: str, game_type: str):
+        """Report a completed game to the server."""
         self._send({
-            "type": "round_complete",
-            "round": round_idx,
-            "difficulty": difficulty,
+            "type": "game_complete",
             "result": result,
             "game_time": game_time,
-            "elapsed": elapsed,
+            "opponent": opponent,
+            "game_type": game_type,
         })
 
+    def queue_pvp(self):
+        """Enter the PvP matchmaking queue."""
+        self._match_event.clear()
+        self._match_info = None
+        self._match_cancelled_reason = None
+        self._send({"type": "queue_pvp"})
+
+    def cancel_pvp(self):
+        """Leave the PvP matchmaking queue."""
+        self._send({"type": "cancel_pvp"})
+
+    def wait_for_match(self, timeout: float = 3600) -> dict | None:
+        """Block until the server assigns a PvP match. Returns match info or None if cancelled."""
+        self._match_event.wait(timeout=timeout)
+        if self._match_cancelled_reason:
+            return None
+        return self._match_info
+
     def send_minimap_init(self, *, map_size: list, playable: list, terrain: str):
-        """Send map geometry and terrain data so the server/dashboard can render the minimap."""
+        """Send map geometry and terrain data for dashboard minimap."""
         self._send({
             "type": "minimap_init",
             "map_size": map_size,
@@ -181,7 +198,7 @@ class LeaderboardClient:
         try:
             asyncio.run_coroutine_threadsafe(self._do_send(data), self._loop)
         except Exception:
-            pass  # Server down, loop closed, etc. — don't crash the game
+            pass
 
     async def _do_send(self, data: dict):
         if self._ws and not self._ws.closed:
@@ -197,4 +214,3 @@ class LeaderboardClient:
                 asyncio.run_coroutine_threadsafe(self._cleanup(), self._loop)
             except Exception:
                 pass
-        # Don't join the daemon thread — it'll die with the process

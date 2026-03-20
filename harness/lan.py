@@ -1,10 +1,11 @@
 import asyncio
 import os
 import socket
+import time
 
 from sc2 import maps
 from sc2.client import Client
-from sc2.data import Race
+from sc2.data import Race, Result
 from sc2.main import _play_game_ai
 from sc2.player import Human
 from sc2.sc2process import SC2Process
@@ -25,14 +26,19 @@ def get_lan_ip() -> str:
         s.close()
 
 
-async def _run_lan_game(client, player_id):
+async def _run_lan_game(client, player_id, lb=None, map_name="", opponent_info=""):
     """Shared game loop for both host and join LAN paths."""
     harness_bot = HarnessBot()
+    harness_bot._map_name = map_name
+    harness_bot._opponent_info = opponent_info
+    if lb:
+        harness_bot._harness_state.lb = lb
 
     print(f"[harness] Joined as player {player_id}. Game starting!")
     print(f"[harness] Edit files in {BOT_PACKAGE}/ while the game runs. Changes apply next tick.")
     print()
 
+    game_start = time.time()
     try:
         result = await _play_game_ai(client, player_id, harness_bot, realtime=True, game_time_limit=None)
     except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
@@ -40,6 +46,7 @@ async def _run_lan_game(client, player_id):
             from .state_writer import write_game_ended_marker
             write_game_ended_marker("ABANDONED")
         raise
+    game_time = time.time() - game_start
 
     print(f"[harness] Game ended: {result}")
 
@@ -47,6 +54,8 @@ async def _run_lan_game(client, player_id):
         await client.leave()
     except Exception:
         pass
+
+    return result, game_time
 
 
 async def _join_game_checked(client, race, portconfig):
@@ -170,5 +179,71 @@ async def join_lan_game(host_ip: str, race: Race, base_port: int, num_players: i
             player_id = await _join_game_checked(client, race, portconfig)
 
             await _run_lan_game(client, player_id)
+    finally:
+        await tunnel.stop()
+
+
+async def host_pvp_game(map_name: str, race: Race, base_port: int,
+                        opponent_name: str = "", lb=None) -> tuple[Result | None, float]:
+    """Host a PvP game coordinated by the leaderboard server."""
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
+    portconfig = make_portconfig(base_port + 1, 2)
+
+    print(f"[arena] Hosting PvP game on {map_name}...")
+    tunnel = await Tunnel.listen(base_port)
+    print(f"[arena] Waiting for opponent to connect...")
+
+    await tunnel.wait_for_peer()
+    print(f"[arena] Opponent connected!")
+
+    try:
+        async with SC2Process() as sc2:
+            players = [Human(Race.Random) for _ in range(2)]
+            create_result = await sc2.create_game(maps.get(map_name), players, realtime=True)
+
+            if create_result.create_game.HasField("error"):
+                err = create_result.create_game.error
+                details = create_result.create_game.error_details if create_result.create_game.HasField("error_details") else ""
+                print(f"[arena] Failed to create game: {err} {details}")
+                return None, 0.0
+
+            print(f"[arena] Game created. Starting...")
+
+            await tunnel.start_relays()
+
+            client = Client(sc2._ws)
+            player_id = await client.join_game(
+                race=race, portconfig=portconfig, host_ip="127.0.0.1"
+            )
+
+            return await _run_lan_game(client, player_id, lb=lb,
+                                       map_name=map_name,
+                                       opponent_info=f"PvP vs {opponent_name}")
+    finally:
+        await tunnel.stop()
+
+
+async def join_pvp_game(host_ip: str, map_name: str, race: Race, base_port: int,
+                        opponent_name: str = "", lb=None) -> tuple[Result | None, float]:
+    """Join a PvP game coordinated by the leaderboard server."""
+    os.environ["SC2SERVERHOST"] = "0.0.0.0"
+
+    portconfig = make_portconfig(base_port + 1, 2)
+
+    print(f"[arena] Connecting to {host_ip}:{base_port}...")
+    tunnel = await Tunnel.connect(host_ip, base_port)
+    print(f"[arena] Connected!")
+
+    try:
+        async with SC2Process() as sc2:
+            await tunnel.start_relays()
+
+            client = Client(sc2._ws)
+            player_id = await _join_game_checked(client, race, portconfig)
+
+            return await _run_lan_game(client, player_id, lb=lb,
+                                       map_name=map_name,
+                                       opponent_info=f"PvP vs {opponent_name}")
     finally:
         await tunnel.stop()
