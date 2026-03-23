@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SC2 Bot Arena — Leaderboard Server.
+VibeCraft Arena — Leaderboard Server.
 
 Players connect via WebSocket, appear on a live dashboard, and can
 be matched against each other for PvP games.
@@ -17,10 +17,23 @@ Routes:
 import argparse
 import asyncio
 import json
+import socket
 import time
 from dataclasses import dataclass, field
 
 from aiohttp import web, WSMsgType
+
+
+def get_lan_ip() -> str:
+    """Return this machine's LAN IP by asking the OS which interface routes to 8.8.8.8."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 @dataclass
@@ -41,8 +54,10 @@ class PlayerState:
 
 
 class LeaderboardServer:
-    def __init__(self):
+    def __init__(self, port: int = 8080):
         self.players: dict[str, PlayerState] = {}
+        self.lan_ip = get_lan_ip()
+        self.port = port
         self._next_match_port = 5200
         self.app = web.Application()
         self.app.router.add_get("/", self.handle_dashboard)
@@ -74,7 +89,13 @@ class LeaderboardServer:
             if p.stats:
                 entry["stats"] = p.stats
             players_data.append(entry)
-        return web.json_response({"players": players_data})
+        return web.json_response({
+            "players": players_data,
+            "connect_info": {
+                "ip": self.lan_ip,
+                "port": self.port,
+            },
+        })
 
     # ── Matchmaking ──────────────────────────────────────────────────
 
@@ -259,7 +280,7 @@ class LeaderboardServer:
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
 
-        print(f"[server] SC2 Bot Arena running on http://0.0.0.0:{port}")
+        print(f"[server] VibeCraft Arena running on http://0.0.0.0:{port}")
         print(f"[server] Dashboard: http://localhost:{port}")
         print()
 
@@ -280,7 +301,7 @@ DASHBOARD_HTML = """\
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SC2 Bot Arena</title>
+<title>VibeCraft Arena</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -313,11 +334,6 @@ DASHBOARD_HTML = """\
     font-size: 1.8rem;
     margin-bottom: 0.5rem;
     color: var(--accent);
-  }
-  .subtitle {
-    color: var(--text-dim);
-    margin-bottom: 2rem;
-    font-size: 0.95rem;
   }
   .card-grid {
     display: grid;
@@ -472,6 +488,37 @@ DASHBOARD_HTML = """\
     font-size: 0.85rem;
     white-space: nowrap;
   }
+  .connect-banner {
+    width: 100%;
+    max-width: 1400px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1.2rem;
+    margin-bottom: 1.5rem;
+    display: none;
+  }
+  .connect-banner.visible { display: block; }
+  .connect-cmds {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .connect-cmd-label {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    margin-bottom: 0.2rem;
+  }
+  .connect-cmd code {
+    display: block;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.85rem;
+    background: rgba(0,0,0,0.3);
+    padding: 0.4rem 0.6rem;
+    border-radius: 4px;
+    color: var(--accent);
+    word-break: break-all;
+  }
   .no-players {
     text-align: center;
     padding: 3rem;
@@ -481,8 +528,19 @@ DASHBOARD_HTML = """\
 </style>
 </head>
 <body>
-<h1>SC2 Bot Arena</h1>
-<p class="subtitle">Live Dashboard</p>
+<h1>VibeCraft Arena</h1>
+<div id="connect-banner" class="connect-banner">
+  <div class="connect-cmds">
+    <div class="connect-cmd">
+      <div class="connect-cmd-label">macOS / Linux</div>
+      <code id="cmd-unix"></code>
+    </div>
+    <div class="connect-cmd">
+      <div class="connect-cmd-label">Windows</div>
+      <code id="cmd-win"></code>
+    </div>
+  </div>
+</div>
 <div id="app"></div>
 
 <script>
@@ -724,10 +782,21 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function updateConnectBanner(info) {
+  if (!info) return;
+  const addr = info.ip + ":" + info.port;
+  document.getElementById("cmd-unix").textContent =
+    ".venv/bin/python ./run.py --leaderboard " + addr;
+  document.getElementById("cmd-win").textContent =
+    ".venv\\\\Scripts\\\\python.exe .\\\\run.py --leaderboard " + addr;
+  document.getElementById("connect-banner").classList.add("visible");
+}
+
 async function poll() {
   try {
     const res = await fetch("/api/state");
     const data = await res.json();
+    updateConnectBanner(data.connect_info);
     render(data);
   } catch (e) {
     // Server might be restarting
@@ -747,7 +816,7 @@ def main():
     parser.add_argument("--port", type=int, default=8080, help="Port to listen on (default: 8080)")
     args = parser.parse_args()
 
-    server = LeaderboardServer()
+    server = LeaderboardServer(port=args.port)
     try:
         asyncio.run(server.start(args.port))
     except KeyboardInterrupt:
