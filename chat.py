@@ -81,6 +81,11 @@ You have SC2-specific tools available via the `sc2` MCP server:
 - `game_errors` — Recent bot errors with tracebacks. **Check this first when debugging.**
 - `bot_log` — Recent bot log messages from `self.log()` calls
 - `run_command` — Execute Python code in the running game. `self` is the BotAI instance. Common imports (UnitTypeId, AbilityId, UpgradeId, Race, Point2) are pre-loaded. Use this to inspect state or issue one-off orders.
+- `wait_until` — Block until the in-game clock reaches a given time (e.g. "3:55"). Returns immediately if the game has ended.
+
+## Monitoring the Game
+
+When asked to monitor, watch, or periodically check the game, loop using `wait_until` to advance in time increments, then check state with `game_state`/`game_events`/`bot_log`. For example, to monitor every 30 seconds: wait_until the next 30s mark, check state, report anything interesting, repeat. `wait_until` returns immediately if the game ends, so the loop will naturally stop.
 
 ## Workflow
 
@@ -217,10 +222,19 @@ def _summarize_tool(name: str, inputs: dict) -> str:
             first_line = first_line[:57] + "..."
         return f"run_command: {first_line}"
 
-    if display_name in ("game_info", "game_state", "game_events", "game_errors", "bot_log"):
+    MCP_LABELS = {
+        "game_info": "Checking game info",
+        "game_state": "Checking game state",
+        "game_events": "Checking game events",
+        "game_errors": "Checking errors",
+        "bot_log": "Checking bot log",
+        "wait_until": "Waiting until {game_time}",
+    }
+    if display_name in MCP_LABELS:
+        label = MCP_LABELS[display_name].format_map(inputs)
         lines = inputs.get("lines")
         suffix = f" (last {lines})" if lines else ""
-        return f"{display_name}{suffix}"
+        return f"{label}...{suffix}"
 
     if name == "TodoWrite":
         return None  # handled by _print_todo_write
@@ -277,6 +291,9 @@ def _short_path(path: str) -> str:
 
 # ── Message display ──────────────────────────────────────────────────────────
 
+_DEFAULT_SPINNER = Spinner("dots", text="thinking... (Esc to interrupt)", style="cyan")
+
+
 def _print_message(msg, verbose: bool, live: Live | None):
     """Print a message from the agent."""
 
@@ -299,6 +316,10 @@ def _print_message(msg, verbose: bool, live: Live | None):
                     console.print(Text(f"    {json.dumps(block.input, indent=2)}", style="dim"))
 
                 if live is not None:
+                    # Show a contextual spinner for long-running tools.
+                    if block.name == "mcp__sc2__wait_until":
+                        game_time = block.input.get("game_time", "?:??")
+                        live.update(Spinner("dots", text=f"waiting until {game_time}... (Esc to interrupt)", style="cyan"))
                     live.start()
 
         if verbose and msg.error:
@@ -325,6 +346,9 @@ def _print_message(msg, verbose: bool, live: Live | None):
             console.print(Text(f"Error: {msg.result}", style="bold red"))
 
     elif isinstance(msg, UserMessage):
+        if live is not None:
+            # Reset spinner to default after tool results come back.
+            live.update(_DEFAULT_SPINNER)
         if verbose:
             for block in msg.content:
                 if isinstance(block, ToolResultBlock):
@@ -350,7 +374,7 @@ async def _drain_response(client, verbose: bool, live: Live):
 async def _run_query(client, verbose: bool, is_tty: bool) -> str | None:
     """Run one agent query cycle. Returns queued follow-up input, or None."""
     live = Live(
-        Spinner("dots", text="thinking...", style="cyan"),
+        _DEFAULT_SPINNER,
         console=console,
         transient=True,
     )
@@ -367,6 +391,7 @@ async def _run_query(client, verbose: bool, is_tty: bool) -> str | None:
     watcher = _KeyWatcher()
     watcher.start(asyncio.get_event_loop())
     next_input = None
+    input_buffer: list[str] = []
 
     try:
         while not response_task.done():
@@ -394,24 +419,23 @@ async def _run_query(client, verbose: bool, is_tty: bool) -> str | None:
                     console.print(Text("  (interrupted)", style="dim yellow"))
                     break
 
-                if not data.startswith(b'\x1b'):
-                    # Printable key — interrupt and prompt for new input.
-                    live.stop()
-                    watcher.stop()
-                    await client.interrupt()
-                    await asyncio.wait_for(response_task, timeout=5.0)
-                    console.print(Text("  (interrupted)", style="dim yellow"))
-                    first_chars = data.decode("utf-8", errors="replace")
-                    # Prompt with first typed chars pre-filled.
-                    try:
-                        next_input = await asyncio.to_thread(
-                            _prompt_session.prompt, "You: ", default=first_chars
-                        )
-                    except (EOFError, KeyboardInterrupt):
-                        pass
-                    break
+                if data.startswith(b'\x1b'):
+                    # Escape sequence (arrow keys etc.) — ignore.
+                    continue
 
-                # Escape sequence (arrow keys etc.) — ignore, loop again.
+                # Printable keys / Enter / Backspace — accumulate into buffer.
+                text = data.decode("utf-8", errors="replace")
+                for ch in text:
+                    if ch in ("\r", "\n"):
+                        if input_buffer:
+                            next_input = "".join(input_buffer)
+                            input_buffer = []
+                    elif ch in ("\x7f", "\x08"):
+                        if input_buffer:
+                            input_buffer.pop()
+                    elif ch >= " ":
+                        input_buffer.append(ch)
+
     except asyncio.TimeoutError:
         response_task.cancel()
     finally:
@@ -433,7 +457,7 @@ async def main(verbose: bool = False):
         system_prompt=SYSTEM_PROMPT.format(bot_dir=BOT_DIR),
         cwd=BOT_DIR,
         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "mcp__sc2__*"],
-        disallowed_tools=["Bash"],
+        disallowed_tools=["Bash", "CronCreate", "CronDelete", "CronList", "EnterWorktree", "ExitWorktree"],
         mcp_servers={
             "sc2": {
                 "command": os.path.join(
@@ -458,7 +482,7 @@ async def main(verbose: bool = False):
         hints = ["'quit' to exit"]
         if is_tty:
             hints.append("Esc to interrupt")
-            hints.append("type to interrupt & follow up")
+            hints.append("type to queue a follow-up")
         console.print(f"[dim]{' | '.join(hints)}[/dim]\n")
 
         next_input = None
@@ -471,6 +495,7 @@ async def main(verbose: bool = False):
                     continue
                 if user_input.strip().lower() in ("quit", "exit", "q"):
                     break
+                console.print(Text(f"You: {user_input}", style="bold"))
             else:
                 try:
                     user_input = await asyncio.to_thread(

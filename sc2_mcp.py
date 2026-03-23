@@ -9,6 +9,7 @@ Or use via .mcp.json for Claude Code integration.
 
 import json
 import os
+import re
 import time
 import uuid
 
@@ -68,6 +69,59 @@ def game_errors(lines: int = 20) -> str:
 def bot_log(lines: int = 50) -> str:
     """Read recent bot log messages from self.log() calls, timestamped with in-game time."""
     return _read_tail(os.path.join(LOG_DIR, "bot.log"), lines)
+
+
+def _game_ended() -> bool:
+    """Check if the game has ended by looking for the GAME ENDED marker in snapshot.txt."""
+    snapshot_path = os.path.join(LOG_DIR, "snapshot.txt")
+    try:
+        with open(snapshot_path) as f:
+            return "GAME ENDED" in f.read()
+    except FileNotFoundError:
+        return False
+
+
+def _current_game_seconds() -> float | None:
+    """Parse current game time in seconds from snapshot.txt, or None if unavailable."""
+    snapshot_path = os.path.join(LOG_DIR, "snapshot.txt")
+    try:
+        with open(snapshot_path) as f:
+            first_line = f.readline()
+    except FileNotFoundError:
+        return None
+    m = re.match(r"Game Time:\s*(\d+):(\d+)", first_line)
+    if not m:
+        return None
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+@mcp.tool()
+def wait_until(game_time: str) -> str:
+    """Block until the in-game clock reaches the specified time, then return.
+
+    Args:
+        game_time: Target time in M:SS or MM:SS format (e.g. "3:55", "12:00").
+
+    Returns the game time when the wait completed.
+    """
+    m = re.match(r"^(\d+):(\d{2})$", game_time.strip())
+    if not m:
+        return f"Error: invalid time format '{game_time}'. Use M:SS or MM:SS (e.g. '3:55')."
+
+    target_seconds = int(m.group(1)) * 60 + int(m.group(2))
+
+    timeout = 1200  # 20 minute wall-clock safety limit
+    start = time.time()
+    while time.time() - start < timeout:
+        if _game_ended():
+            return f"Game ended before reaching {game_time}."
+        current = _current_game_seconds()
+        if current is not None and current >= target_seconds:
+            mins, secs = divmod(int(current), 60)
+            return f"Reached game time {mins}:{secs:02d} (target was {game_time})."
+        time.sleep(1)
+
+    return f"Timed out after {timeout}s wall-clock waiting for game time {game_time}. Is the game running?"
 
 
 @mcp.tool()
