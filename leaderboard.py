@@ -62,6 +62,7 @@ class LeaderboardServer:
         self.app = web.Application()
         self.app.router.add_get("/", self.handle_dashboard)
         self.app.router.add_get("/api/state", self.handle_api_state)
+        self.app.router.add_delete("/api/players/{name}", self.handle_delete_player)
         self.app.router.add_get("/ws", self.handle_ws)
 
     # ── HTTP handlers ────────────────────────────────────────────────
@@ -96,6 +97,17 @@ class LeaderboardServer:
                 "port": self.port,
             },
         })
+
+    async def handle_delete_player(self, request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        player = self.players.get(name)
+        if not player:
+            return web.json_response({"error": "not found"}, status=404)
+        if player.state != "disconnected":
+            return web.json_response({"error": "player is still connected"}, status=409)
+        del self.players[name]
+        print(f"[server] Removed player {name} (via dashboard)")
+        return web.json_response({"ok": True})
 
     # ── Matchmaking ──────────────────────────────────────────────────
 
@@ -519,6 +531,21 @@ DASHBOARD_HTML = """\
     color: var(--accent);
     word-break: break-all;
   }
+  .btn-delete {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.4rem;
+    line-height: 1;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .btn-delete:hover {
+    color: var(--red);
+    border-color: var(--red);
+  }
   .no-players {
     text-align: center;
     padding: 3rem;
@@ -683,6 +710,9 @@ function render(data) {
     // Header: name, race
     html += '<div class="card-header">';
     html += '<span class="card-name">' + esc(p.name) + '</span>';
+    if (p.state === "disconnected") {
+      html += '<button class="btn-delete" onclick="deletePlayer(this.dataset.name)" data-name="' + esc(p.name) + '" title="Remove player">✕</button>';
+    }
     if (p.race) html += '<span class="card-race ' + raceClass + '">' + esc(p.race) + '</span>';
     html += '</div>';
 
@@ -790,6 +820,13 @@ function updateConnectBanner(info) {
   document.getElementById("cmd-win").textContent =
     ".venv\\\\Scripts\\\\python.exe .\\\\run.py --leaderboard " + addr;
   document.getElementById("connect-banner").classList.add("visible");
+}
+
+async function deletePlayer(name) {
+  try {
+    const res = await fetch("/api/players/" + encodeURIComponent(name), { method: "DELETE" });
+    if (res.ok) poll();
+  } catch (e) {}
 }
 
 async function poll() {
