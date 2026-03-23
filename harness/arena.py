@@ -7,14 +7,20 @@ connected player (matchmade by the leaderboard server).
 """
 
 import asyncio
+import json
 import os
 import socket
 import time
 
-from prompt_toolkit import print_formatted_text, HTML
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.shortcuts import radiolist_dialog, input_dialog, message_dialog
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window, WindowAlign
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.shortcuts import message_dialog
 from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import Box, Button, Dialog, Label, RadioList, TextArea
 
 from sc2 import maps
 from sc2.data import Difficulty, Race, Result
@@ -43,11 +49,32 @@ DIALOG_STYLE = Style.from_dict({
     "radio":              "#58a6ff",
     "radio-checked":      "#3fb950 bold",
     "text-area":          "bg:#0d1117 #c9d1d9",
+    "label":              "#8b949e",
+    "section-label":      "#58a6ff bold",
 })
+
+_PREFS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".arena_prefs.json")
+
+
+def _load_prefs() -> dict:
+    try:
+        with open(_PREFS_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_prefs(prefs: dict):
+    try:
+        with open(_PREFS_PATH, "w") as f:
+            json.dump(prefs, f)
+    except OSError:
+        pass
 
 
 def _radio(title: str, values: list[tuple], default=None):
     """Show a full-screen radio list dialog. Returns the selected value or None on cancel."""
+    from prompt_toolkit.shortcuts import radiolist_dialog
     result = radiolist_dialog(
         title=title,
         values=values,
@@ -57,57 +84,124 @@ def _radio(title: str, values: list[tuple], default=None):
     return result
 
 
-def tui_registration(args) -> tuple[str, Race]:
-    """Show the registration form and return (name, race)."""
-    default_name = args.name or socket.gethostname().split(".")[0]
+def _combined_dialog(title, sections, ok_text="OK", cancel_text="Cancel"):
+    """Show a dialog with multiple labeled sections (widgets).
 
-    name = input_dialog(
-        title="SC2 Bot Arena",
-        text="Enter your name:",
-        default=default_name,
+    sections: list of (label_str, widget) pairs.
+    Returns True on OK, None on cancel.
+    """
+    result = [None]
+
+    def on_ok():
+        result[0] = True
+        app.exit()
+
+    def on_cancel():
+        app.exit()
+
+    ok_button = Button(text=ok_text, handler=on_ok)
+    cancel_button = Button(text=cancel_text, handler=on_cancel)
+
+    body_rows = []
+    for label_text, widget in sections:
+        body_rows.append(Window(
+            FormattedTextControl([("class:section-label", label_text)]),
+            height=1,
+        ))
+        body_rows.append(widget)
+        body_rows.append(Window(height=1))  # spacer
+
+    # Remove trailing spacer
+    if body_rows:
+        body_rows.pop()
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(body_rows, padding=0),
+        buttons=[ok_button, cancel_button],
+        with_background=True,
+    )
+
+    app = Application(
+        layout=Layout(dialog),
         style=DIALOG_STYLE,
-    ).run()
+        full_screen=True,
+        mouse_support=True,
+    )
+    app.run()
+    return result[0]
 
-    if name is None:
-        raise SystemExit(0)
-    name = name.strip() or default_name
 
-    race = _radio("SC2 Bot Arena — Choose Race", [
+def tui_registration(args) -> tuple[str, Race]:
+    """Show a single registration dialog with name + race."""
+    prefs = _load_prefs()
+
+    default_name = args.name or prefs.get("name") or os.getlogin()
+    saved_race = RACE_MAP.get(prefs.get("race", "").lower())
+    default_race = saved_race or RACE_MAP.get(args.race, Race.Terran)
+
+    name_input = TextArea(
+        text=default_name,
+        multiline=False,
+        height=1,
+    )
+
+    race_list = RadioList([
         (Race.Terran, "Terran"),
         (Race.Protoss, "Protoss"),
         (Race.Zerg, "Zerg"),
-    ], default=RACE_MAP.get(args.race, Race.Terran))
+    ], default=default_race)
 
-    if race is None:
+    result = _combined_dialog(
+        "SC2 Bot Arena",
+        [
+            ("Name", name_input),
+            ("Race", race_list),
+        ],
+        ok_text="Connect",
+        cancel_text="Quit",
+    )
+
+    if result is None:
         raise SystemExit(0)
 
+    name = name_input.text.strip() or default_name
+    race = race_list.current_value
+
+    _save_prefs({"name": name, "race": race.name})
     return name, race
 
 
 def show_main_menu() -> str:
-    """Show the main menu and return the choice."""
-    choice = _radio("SC2 Bot Arena", [
+    """Show the main menu. Returns 'cpu', 'pvp', or 'quit'."""
+    action_list = RadioList([
         ("cpu", "Play vs Computer"),
         ("pvp", "Play vs Player"),
         ("quit", "Quit"),
     ], default="cpu")
 
-    if choice is None:
+    result = _combined_dialog(
+        "SC2 Bot Arena",
+        [
+            ("What would you like to do?", action_list),
+        ],
+        ok_text="Go",
+        cancel_text="Quit",
+    )
+
+    if result is None:
         return "quit"
-    return choice
+    return action_list.current_value
 
 
-def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty]:
-    """Show CPU game options and return (enemy_race, difficulty)."""
-    enemy_race = _radio("Enemy Race", [
+def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty] | None:
+    """Show enemy race + difficulty in a single dialog. Returns None on cancel."""
+    race_list = RadioList([
         (Race.Random, "Random"),
         (Race.Terran, "Terran"),
         (Race.Protoss, "Protoss"),
         (Race.Zerg, "Zerg"),
     ], default=Race.Random)
-
-    if enemy_race is None:
-        enemy_race = Race.Random
 
     default_diff = DIFFICULTIES[default_difficulty_idx]
     diff_values = []
@@ -117,11 +211,21 @@ def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty]:
             label += "  (default)"
         diff_values.append((d, label))
 
-    difficulty = _radio("Difficulty", diff_values, default=default_diff)
-    if difficulty is None:
-        difficulty = default_diff
+    diff_list = RadioList(diff_values, default=default_diff)
 
-    return enemy_race, difficulty
+    result = _combined_dialog(
+        "Play vs Computer",
+        [
+            ("Enemy Race", race_list),
+            ("Difficulty", diff_list),
+        ],
+        ok_text="Start",
+        cancel_text="Back",
+    )
+
+    if result is None:
+        return None
+    return race_list.current_value, diff_list.current_value
 
 
 def play_cpu_game(args, race: Race, enemy_race: Race, difficulty: Difficulty,
@@ -206,7 +310,10 @@ def run_arena(args):
             choice = show_main_menu()
 
             if choice == "cpu":
-                enemy_race, difficulty = show_cpu_menu(difficulty_idx)
+                cpu_opts = show_cpu_menu(difficulty_idx)
+                if cpu_opts is None:
+                    continue  # user pressed Back
+                enemy_race, difficulty = cpu_opts
                 result, game_time = play_cpu_game(args, race, enemy_race, difficulty, lb)
 
                 result_name = result.name if result else "Unknown"

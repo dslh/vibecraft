@@ -3,6 +3,7 @@ log/
 commands/
 .chat_history
 .env
+.arena_prefs.json
 .venv/
 python-sc2/
 s2client-proto/
