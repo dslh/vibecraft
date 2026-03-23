@@ -301,8 +301,8 @@ def run_arena(args):
         print("  Could not connect to leaderboard server.")
         return
 
-    # Default difficulty starts at Medium, bumps up on CPU wins
-    difficulty_idx = 2
+    # Default difficulty starts at VeryEasy, bumps up on CPU wins
+    difficulty_idx = 0
 
     try:
         while True:
@@ -314,6 +314,7 @@ def run_arena(args):
                 if cpu_opts is None:
                     continue  # user pressed Back
                 enemy_race, difficulty = cpu_opts
+                difficulty_idx = DIFFICULTIES.index(difficulty)
                 result, game_time = play_cpu_game(args, race, enemy_race, difficulty, lb)
 
                 result_name = result.name if result else "Unknown"
