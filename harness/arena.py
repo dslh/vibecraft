@@ -194,7 +194,7 @@ def show_main_menu() -> str:
     return action_list.current_value
 
 
-def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty] | None:
+def show_cpu_menu(default_difficulty_idx: int, cancel_text: str = "Back") -> tuple[Race, Difficulty] | None:
     """Show enemy race + difficulty in a single dialog. Returns None on cancel."""
     race_list = RadioList([
         (Race.Random, "Random"),
@@ -220,7 +220,7 @@ def show_cpu_menu(default_difficulty_idx: int) -> tuple[Race, Difficulty] | None
             ("Difficulty", diff_list),
         ],
         ok_text="Start",
-        cancel_text="Back",
+        cancel_text=cancel_text,
     )
 
     if result is None:
@@ -307,12 +307,19 @@ def run_arena(args):
     try:
         while True:
             lb.send_status(state="idle")
-            choice = show_main_menu()
+
+            if lb.pvp_enabled:
+                choice = show_main_menu()
+            else:
+                choice = "cpu"
 
             if choice == "cpu":
-                cpu_opts = show_cpu_menu(difficulty_idx)
+                cancel_text = "Quit" if not lb.pvp_enabled else "Back"
+                cpu_opts = show_cpu_menu(difficulty_idx, cancel_text=cancel_text)
                 if cpu_opts is None:
-                    continue  # user pressed Back
+                    if not lb.pvp_enabled:
+                        break  # quit
+                    continue  # back to main menu
                 enemy_race, difficulty = cpu_opts
                 difficulty_idx = DIFFICULTIES.index(difficulty)
                 result, game_time = play_cpu_game(args, race, enemy_race, difficulty, lb)

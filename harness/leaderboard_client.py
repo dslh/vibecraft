@@ -42,6 +42,7 @@ class LeaderboardClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self._connected = False
+        self.pvp_enabled = True
 
     def start(self):
         """Start the background thread and connect to the server."""
@@ -100,6 +101,7 @@ class LeaderboardClient:
                     msg_type = data.get("type")
 
                     if msg_type == "connected":
+                        self.pvp_enabled = data.get("pvp_enabled", True)
                         print(f"[leaderboard] Registered as '{self.name}'")
                         self._connect_event.set()
 

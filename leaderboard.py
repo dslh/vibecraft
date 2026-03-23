@@ -54,10 +54,11 @@ class PlayerState:
 
 
 class LeaderboardServer:
-    def __init__(self, port: int = 8080):
+    def __init__(self, port: int = 8080, no_multi: bool = False):
         self.players: dict[str, PlayerState] = {}
         self.lan_ip = get_lan_ip()
         self.port = port
+        self.no_multi = no_multi
         self._next_match_port = 5200
         self.app = web.Application()
         self.app.router.add_get("/", self.handle_dashboard)
@@ -201,7 +202,7 @@ class LeaderboardServer:
                             )
                             print(f"[server] {player_name} joined ({race}, {peer_ip})")
 
-                        await ws.send_json({"type": "connected"})
+                        await ws.send_json({"type": "connected", "pvp_enabled": not self.no_multi})
 
                     elif msg_type == "status" and player_name:
                         p = self.players.get(player_name)
@@ -851,9 +852,10 @@ setInterval(poll, 2000);
 def main():
     parser = argparse.ArgumentParser(description="SC2 Bot Arena — Leaderboard Server")
     parser.add_argument("--port", type=int, default=8080, help="Port to listen on (default: 8080)")
+    parser.add_argument("--no-multi", action="store_true", help="Disable Player vs Player mode")
     args = parser.parse_args()
 
-    server = LeaderboardServer(port=args.port)
+    server = LeaderboardServer(port=args.port, no_multi=args.no_multi)
     try:
         asyncio.run(server.start(args.port))
     except KeyboardInterrupt:
